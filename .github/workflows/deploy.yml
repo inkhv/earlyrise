@@ -53,7 +53,9 @@ jobs:
             packages/shared/dist
             packages/telegram/dist
             packages/stt-nhn/dist
-            deploy
+            deploy/scripts
+            deploy/systemd
+            deploy/env.production.example
           target: /opt/earlyrise
           strip_components: 0
           overwrite: true
@@ -66,6 +68,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
           script: |
+            sudo systemctl daemon-reload || true
             sudo systemctl restart earlyrise-api earlyrise-bot
             sudo systemctl status earlyrise-api --no-pager || true
             sudo systemctl status earlyrise-bot --no-pager || true
