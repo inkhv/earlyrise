@@ -15,6 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify SSH secrets are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.SSH_HOST }}" || (echo "Missing secret: SSH_HOST" && exit 1)
+          test -n "${{ secrets.SSH_USER }}" || (echo "Missing secret: SSH_USER" && exit 1)
+          test -n "${{ secrets.SSH_PRIVATE_KEY }}" || (echo "Missing secret: SSH_PRIVATE_KEY" && exit 1)
+          # SSH_PORT is optional (defaults to 22)
+          echo "SSH secrets: OK"
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -41,7 +51,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
+          port: ${{ secrets.SSH_PORT || '22' }}
           source: |
             apps/api/dist
             apps/bot/dist
@@ -66,7 +76,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
+          port: ${{ secrets.SSH_PORT || '22' }}
           script: |
             sudo systemctl daemon-reload || true
             sudo systemctl restart earlyrise-api earlyrise-bot
