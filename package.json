@@ -1,0 +1,28 @@
+{
+  "name": "earlyrise",
+  "private": true,
+  "packageManager": "pnpm@9.15.3",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "format": "prettier -w .",
+    "supabase:seed": "node supabase/seed/seed.mjs"
+  },
+  "devDependencies": {
+    "prettier": "3.4.2",
+    "turbo": "2.3.3",
+    "typescript": "5.7.2"
+  }
+}
+
+
+
+
+
+

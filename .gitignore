@@ -1,0 +1,23 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# builds
+dist/
+.turbo/
+.next/
+out/
+
+# local env (Cursor workspace may not allow dotfiles; we use env.local)
+**/env.local
+deploy/env.production
+
+# logs
+*.log
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+

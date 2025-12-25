@@ -1,0 +1,17 @@
+[Unit]
+Description=earlyrise API (Fastify)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/earlyrise
+EnvironmentFile=/opt/earlyrise/deploy/env.production
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/env node /opt/earlyrise/apps/api/dist/index.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+

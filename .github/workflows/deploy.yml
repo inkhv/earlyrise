@@ -1,0 +1,73 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.3
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Build
+        run: |
+          pnpm i --frozen-lockfile
+          pnpm -C packages/shared build
+          pnpm -C packages/telegram build
+          pnpm -C packages/stt-nhn build
+          pnpm -C apps/api build
+          pnpm -C apps/bot build
+
+      - name: Upload build to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: |
+            apps/api/dist
+            apps/bot/dist
+            package.json
+            pnpm-lock.yaml
+            pnpm-workspace.yaml
+            turbo.json
+            tsconfig.base.json
+            packages/shared/dist
+            packages/telegram/dist
+            packages/stt-nhn/dist
+            deploy
+          target: /opt/earlyrise
+          strip_components: 0
+          overwrite: true
+
+      - name: Restart services
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            sudo systemctl restart earlyrise-api earlyrise-bot
+            sudo systemctl status earlyrise-api --no-pager || true
+            sudo systemctl status earlyrise-bot --no-pager || true
+
+
