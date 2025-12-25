@@ -19,13 +19,6 @@ MVP платформа челленджа ранних подъёмов для T
 pnpm i
 ```
 
-3) Настрой env (см. папки приложений):
-- `apps/api/env.example`
-- `apps/bot/env.example`
-- `apps/web/env.example`
-
-> Важно: в этом workspace `.env` может быть заблокирован.  
-> Используй `env.local` рядом с `env.example` (например, `apps/api/env.local`, `apps/bot/env.local`).
 
 4) Запусти dev:
 
