@@ -31,11 +31,6 @@ pnpm dev
 Схема БД лежит в `supabase/migrations/`.  
 Seed: `pnpm supabase:seed`.
 
-## Staging / Production
-
-Шаблоны env:
-- `deploy/env.production.example`
-
 ## Deploy (VPS + Docker Compose)
 
 См. `deploy/README.md` (systemd + git pull; Docker можно добавить позже).
