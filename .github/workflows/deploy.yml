@@ -16,7 +16,6 @@ jobs:
       DEPLOY_HOST: ${{ secrets.SSH_HOST || secrets.SERVER_HOST }}
       DEPLOY_USER: ${{ secrets.SSH_USER || secrets.SERVER_USER }}
       DEPLOY_PORT: ${{ secrets.SSH_PORT || secrets.SERVER_PORT || '22' }}
-      DEPLOY_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,8 +25,20 @@ jobs:
           set -euo pipefail
           test -n "${DEPLOY_HOST}" || (echo "Missing secret: SSH_HOST or SERVER_HOST" && exit 1)
           test -n "${DEPLOY_USER}" || (echo "Missing secret: SSH_USER or SERVER_USER" && exit 1)
-          test -n "${DEPLOY_KEY}" || (echo "Missing secret: SSH_PRIVATE_KEY" && exit 1)
+          test -n "${{ secrets.SSH_PRIVATE_KEY }}" || (echo "Missing secret: SSH_PRIVATE_KEY" && exit 1)
           echo "SSH secrets: OK"
+
+      - name: Validate SSH private key format (no output)
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEY_FILE="$(mktemp)"
+          # write multi-line key exactly as provided
+          printf "%s" "${{ secrets.SSH_PRIVATE_KEY }}" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          ssh-keygen -y -f "$KEY_FILE" >/dev/null
+          rm -f "$KEY_FILE"
+          echo "SSH private key: OK"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -54,7 +65,7 @@ jobs:
         with:
           host: ${{ env.DEPLOY_HOST }}
           username: ${{ env.DEPLOY_USER }}
-          key: ${{ env.DEPLOY_KEY }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ env.DEPLOY_PORT }}
           source: |
             apps/api/dist
@@ -79,7 +90,7 @@ jobs:
         with:
           host: ${{ env.DEPLOY_HOST }}
           username: ${{ env.DEPLOY_USER }}
-          key: ${{ env.DEPLOY_KEY }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ env.DEPLOY_PORT }}
           script: |
             sudo systemctl daemon-reload || true
