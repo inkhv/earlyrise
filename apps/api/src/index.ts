@@ -816,8 +816,38 @@ app.post("/bot/checkin/voice", async (req, reply) => {
       replyText = chat.reply;
       raw = { stt: stt.raw, chat: chat.raw };
     } catch (e: any) {
-      raw = { error: true, message: e?.message || String(e) };
-      replyText = fallbackCuratorReply(null);
+      // If OpenAI is blocked by region (common on some VPS), fall back to n8n if configured.
+      const msg = e?.message || String(e);
+      raw = { error: true, message: msg };
+      if (env.N8N_WEBHOOK_URL && audio_base64) {
+        const payload = {
+          event: "earlyrise_voice_checkin",
+          prompt: { system: CURATOR_SYSTEM_PROMPT },
+          user: {
+            telegram_user_id,
+            username: user.username,
+            first_name: user.first_name,
+            timezone: user.timezone
+          },
+          challenge: { id: challenge.id, title: challenge.title },
+          checkin: { id: inserted.data.id, checkin_at_utc: inserted.data.checkin_at_utc, duration: meta.duration },
+          telegram: { chat_id: meta.chat_id, message_id: meta.message_id, file_id },
+          audio: { mime: audio_mime, base64: audio_base64 }
+        };
+        try {
+          const r = await postJson(env.N8N_WEBHOOK_URL, payload, 30000);
+          const j = r.json || {};
+          transcript = typeof j.transcript === "string" ? j.transcript : transcript;
+          confidence = typeof j.confidence === "number" ? j.confidence : confidence;
+          replyText = typeof j.reply === "string" ? j.reply : fallbackCuratorReply(transcript || null);
+          raw = { openai_error: msg, n8n: { status: r.status, ok: r.ok, json: r.json ?? null } };
+        } catch (e2: any) {
+          raw = { openai_error: msg, n8n_error: e2?.message || String(e2) };
+          replyText = fallbackCuratorReply(null);
+        }
+      } else {
+        replyText = fallbackCuratorReply(null);
+      }
     }
   } else {
     // No OpenAI key/audio: still provide fallback
