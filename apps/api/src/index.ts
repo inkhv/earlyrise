@@ -88,12 +88,13 @@ type Env = {
   SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   PORT: string;
-  N8N_WEBHOOK_URL?: string;
-  OPENAI_API_KEY?: string;
-  OPENAI_CHAT_MODEL?: string;
-  OPENAI_STT_MODEL?: string;
-  OPENAI_PROMPT_ID?: string;
-  OPENAI_PROMPT_VERSION?: string;
+  N8N_WEBHOOK_URL?: string | undefined;
+  OPENAI_API_KEY?: string | undefined;
+  OPENAI_API_KEY_FILE?: string | undefined;
+  OPENAI_CHAT_MODEL?: string | undefined;
+  OPENAI_STT_MODEL?: string | undefined;
+  OPENAI_PROMPT_ID?: string | undefined;
+  OPENAI_PROMPT_VERSION?: string | undefined;
 };
 
 function getEnv(): Env {
@@ -101,13 +102,17 @@ function getEnv(): Env {
   for (const k of required) {
     if (!process.env[k]) throw new Error(`Missing env: ${k}`);
   }
+  const keyFile = process.env.OPENAI_API_KEY_FILE?.trim() || undefined;
+  const keyFromFile =
+    !process.env.OPENAI_API_KEY && keyFile && fs.existsSync(keyFile) ? fs.readFileSync(keyFile, "utf8").trim() : undefined;
   return {
     SUPABASE_URL: process.env.SUPABASE_URL!,
     SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY!,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY!,
     PORT: process.env.PORT || "3001",
     N8N_WEBHOOK_URL: process.env.N8N_WEBHOOK_URL?.trim() || undefined,
-    OPENAI_API_KEY: process.env.OPENAI_API_KEY?.trim() || undefined,
+    OPENAI_API_KEY: keyFromFile || process.env.OPENAI_API_KEY?.trim() || undefined,
+    OPENAI_API_KEY_FILE: keyFile,
     OPENAI_CHAT_MODEL: process.env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
     OPENAI_STT_MODEL: process.env.OPENAI_STT_MODEL?.trim() || "whisper-1",
     OPENAI_PROMPT_ID: process.env.OPENAI_PROMPT_ID?.trim() || undefined,
