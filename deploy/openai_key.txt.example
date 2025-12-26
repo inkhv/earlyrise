@@ -1,7 +1,0 @@
-# Put your NEW OpenAI API key into deploy/openai_key.txt (this file is ignored by git).
-# Do NOT paste keys into chat.
-#
-# Example (do not use):
-# sk-proj-....
-
-

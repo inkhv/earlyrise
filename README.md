@@ -31,9 +31,10 @@ pnpm dev
 Схема БД лежит в `supabase/migrations/`.  
 Seed: `pnpm supabase:seed`.
 
-## Deploy (VPS + Docker Compose)
+## Deploy (VPS, systemd + server-side autodeploy)
 
-См. `deploy/README.md` (systemd + git pull; Docker можно добавить позже).
+На VPS настроен systemd timer, который раз в минуту подтягивает `main` из GitHub и перезапускает сервисы при появлении нового коммита.
+См. `deploy/README.md`.
 
 ## Specs
 - Bot spec (включая механику напарников): `docs/bot-spec.md`
