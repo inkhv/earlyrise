@@ -12,6 +12,7 @@ out/
 **/env.local
 **/env.example
 deploy/env.production
+deploy/openai_key.txt
 
 # logs
 *.log
