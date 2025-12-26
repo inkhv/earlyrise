@@ -1,5 +1,6 @@
 import { Bot } from "grammy";
 import { isLikelyIanaTimezone } from "@earlyrise/shared";
+import { telegramGetFile } from "@earlyrise/telegram";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +61,17 @@ async function api<T = any>(path: string, init?: RequestInit): Promise<{ status:
     json = null;
   }
   return { status: res.status, ok: res.ok, json, text };
+}
+
+async function telegramDownloadVoiceAsBase64(fileId: string): Promise<{ base64: string; mime: string; file_id: string }> {
+  const file = await telegramGetFile(E.TELEGRAM_BOT_TOKEN, fileId);
+  const filePath = file.file_path;
+  const url = `https://api.telegram.org/file/bot${E.TELEGRAM_BOT_TOKEN}/${filePath}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`telegram download failed: ${res.status} ${res.statusText}`);
+  const buf = new Uint8Array(await res.arrayBuffer());
+  const base64 = Buffer.from(buf).toString("base64");
+  return { base64, mime: "audio/ogg", file_id: fileId };
 }
 
 // Ensure we are the only consumer (no webhook), and ensure command list is up-to-date.
@@ -167,20 +179,12 @@ bot.on("message:text", async (ctx) => {
     }
   }
 
-  // Private / DM flow: keep existing behavior (window logic)
-  try {
-    const r = await api("/bot/checkin/text", {
-      method: "POST",
-      body: JSON.stringify({ telegram_user_id: ctx.from.id, text })
-    });
-    const res: any = r.json;
-    if (r.ok && res?.ok) {
-      return ctx.reply("Чек-ин принят ✅");
-    }
-    return ctx.reply(res?.message ? `Не принято: ${res.message}` : `Не принято (HTTP ${r.status})`);
-  } catch (e: any) {
-    return ctx.reply(`Ошибка check-in: ${e?.message || e}`);
-  }
+  // Private / DM flow: no active chat with AI. Ask for voice check-in.
+  return ctx.reply(
+    "Я куратор по ранним подъёмам и не веду переписку.\n\n" +
+      "Запиши, пожалуйста, голосовое: как прошёл подъём и какие планы на утро (если планов нет — это ок, просто скажи как есть).\n\n" +
+      "Моя цель — помочь тебе прийти к тому, чтобы 80% подъёмов были в нужное время."
+  );
 });
 
 bot.on("message:voice", async (ctx) => {
@@ -189,6 +193,7 @@ bot.on("message:voice", async (ctx) => {
   const isGroup = chatType === "group" || chatType === "supergroup";
   const v = ctx.message.voice;
   try {
+    const audio = await telegramDownloadVoiceAsBase64(v.file_id);
     const r = await api("/bot/checkin/voice", {
       method: "POST",
       body: JSON.stringify({
@@ -198,13 +203,18 @@ bot.on("message:voice", async (ctx) => {
         chat_id: ctx.chat?.id,
         message_id: ctx.message.message_id,
         file_id: v.file_id,
-        duration: v.duration
+        duration: v.duration,
+        audio_base64: audio.base64,
+        audio_mime: audio.mime
       })
     });
     const res: any = r.json;
     // Silent mode in group chat; DM can receive ack
     if (isGroup) return;
-    if (r.ok && res?.ok) return ctx.reply("✅ voice");
+    if (r.ok && res?.ok) {
+      const replyText = res.reply_text || "Принял голосовое ✅";
+      return ctx.reply(replyText);
+    }
     return ctx.reply(res?.message ? `Voice: ${res.message}` : `Voice: ошибка (HTTP ${r.status})`);
   } catch (e: any) {
     if (isGroup) return;

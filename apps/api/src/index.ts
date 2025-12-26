@@ -88,6 +88,7 @@ type Env = {
   SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   PORT: string;
+  N8N_WEBHOOK_URL?: string;
 };
 
 function getEnv(): Env {
@@ -99,7 +100,8 @@ function getEnv(): Env {
     SUPABASE_URL: process.env.SUPABASE_URL!,
     SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY!,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    PORT: process.env.PORT || "3001"
+    PORT: process.env.PORT || "3001",
+    N8N_WEBHOOK_URL: process.env.N8N_WEBHOOK_URL?.trim() || undefined
   };
 }
 
@@ -120,6 +122,60 @@ await app.register(cors, { origin: true });
 app.get("/health", async () => {
   return { ok: true, service: "earlyrise-api", ts: new Date().toISOString() };
 });
+
+const CURATOR_SYSTEM_PROMPT = [
+  "Ты — наставник/куратор по ранним подъёмам.",
+  "Участник не ведёт переписку: он отправляет голосовой отчёт и получает один ответ.",
+  "Твоя цель — мягко поддержать и помочь прийти к 80% подъёмов в нужное время (стабильность важнее идеальности).",
+  "",
+  "Правила ответа:",
+  "- Русский язык, тон тёплый и спокойный, без мотивационных лозунгов.",
+  "- 5–10 коротких предложений (1–2 абзаца).",
+  "- Структура: отражение/перефраз → сильные стороны → зона роста → 1 микро‑шаг на завтра → напоминание про цель 80%.",
+  "- Если планов нет: предложи в следующий раз ответить на 2 вопроса: (1) что делаю в первые 10 минут? (2) какой 1 результат до ближайшего часа?"
+].join("\n");
+
+async function postJson(url: string, body: unknown, timeoutMs = 25000): Promise<{ ok: boolean; status: number; json: any; text: string }> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    });
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    return { ok: res.ok, status: res.status, json, text };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function fallbackCuratorReply(transcript: string | null): string {
+  const hasContent = !!(transcript && transcript.trim().length > 0);
+  if (!hasContent) {
+    return [
+      "Принял твоё голосовое. Главное — ты зафиксировал подъём, это уже шаг к стабильности.",
+      "Сильная сторона — ты отмечаешь прогресс и не “сливаешь” утро.",
+      "На завтра попробуй добавить немного конкретики: что ты сделаешь в первые 10 минут после подъёма и какой один результат хочешь получить в течение ближайшего часа.",
+      "Мы идём к цели спокойно: 80% подъёмов в нужное время — это и есть победа."
+    ].join(" ");
+  }
+  return [
+    "Принял твоё голосовое — спасибо за конкретику.",
+    "Сильная сторона — ты замечаешь, что у тебя получилось, и формулируешь намерение на утро.",
+    "Аккуратно про зону роста: выбери один самый маленький первый шаг (на 10–20 минут), чтобы утро не расплывалось.",
+    "На завтра: назови один конкретный результат до ближайшего часа после подъёма.",
+    "Двигаемся к 80% подъёмов в нужное время — без давления, шаг за шагом."
+  ].join(" ");
+}
 
 // --- Admin auth (MVP) ---
 // Web sends Supabase access token in Authorization: Bearer <jwt>
@@ -547,12 +603,24 @@ app.post("/bot/checkin/plus", async (req, reply) => {
 });
 
 // POST /bot/checkin/voice (MVP: record voice as check-in; transcript optional)
-// body: { telegram_user_id: number, file_id: string, duration?: number, chat_id?: number, message_id?: number, username?: string|null, first_name?: string|null }
+// body: {
+//   telegram_user_id: number,
+//   file_id: string,
+//   duration?: number,
+//   chat_id?: number,
+//   message_id?: number,
+//   username?: string|null,
+//   first_name?: string|null,
+//   audio_base64?: string,      // optional: OGG/Opus bytes
+//   audio_mime?: string         // optional, default audio/ogg
+// }
 app.post("/bot/checkin/voice", async (req, reply) => {
   const body = req.body as any;
   const telegram_user_id = Number(body.telegram_user_id);
   const file_id = String(body.file_id || "").trim();
   const duration = body.duration !== undefined ? Number(body.duration) : undefined;
+  const audio_base64 = body.audio_base64 ? String(body.audio_base64).trim() : "";
+  const audio_mime = body.audio_mime ? String(body.audio_mime).trim() : "audio/ogg";
   if (!file_id) {
     reply.code(400);
     return { ok: false, error: "missing_file_id" };
@@ -592,18 +660,59 @@ app.post("/bot/checkin/voice", async (req, reply) => {
     }
   ]).select("*").single();
 
-  // Create transcript placeholder (MVP)
+  // Voice transcript + curator feedback
+  let transcript: string | null = null;
+  let confidence: number | null = null;
+  let replyText: string | null = null;
+  let raw: any = { skipped: true, reason: "mvp_no_n8n" };
+
+  const voiceEnabled = settings.data.voice_feedback_enabled !== false;
+  if (!voiceEnabled) {
+    replyText = "Принял голосовое. (Сейчас фидбек по голосу отключён в настройках.)";
+  } else if (env.N8N_WEBHOOK_URL && audio_base64) {
+    const payload = {
+      event: "earlyrise_voice_checkin",
+      prompt: { system: CURATOR_SYSTEM_PROMPT },
+      user: {
+        telegram_user_id,
+        username: user.username,
+        first_name: user.first_name,
+        timezone: user.timezone
+      },
+      challenge: { id: challenge.id, title: challenge.title },
+      checkin: { id: inserted.data.id, checkin_at_utc: inserted.data.checkin_at_utc, duration: meta.duration },
+      telegram: { chat_id: meta.chat_id, message_id: meta.message_id, file_id },
+      audio: { mime: audio_mime, base64: audio_base64 }
+    };
+
+    try {
+      const r = await postJson(env.N8N_WEBHOOK_URL, payload, 30000);
+      raw = { status: r.status, ok: r.ok, json: r.json ?? null, text: r.text };
+      const j = r.json || {};
+      transcript = typeof j.transcript === "string" ? j.transcript : null;
+      confidence = typeof j.confidence === "number" ? j.confidence : null;
+      replyText = typeof j.reply === "string" ? j.reply : null;
+      if (!replyText) replyText = fallbackCuratorReply(transcript);
+    } catch (e: any) {
+      raw = { error: true, message: e?.message || String(e) };
+      replyText = fallbackCuratorReply(null);
+    }
+  } else {
+    // No n8n integration yet — return fallback (still useful)
+    replyText = fallbackCuratorReply(null);
+  }
+
   await supabaseAdmin.from("voice_transcripts").insert([
     {
       checkin_id: inserted.data.id,
-      provider: "nhn",
-      transcript: "",
-      confidence: 0,
-      raw: { skipped: true, reason: "mvp_no_download_or_stt" }
+      provider: "n8n",
+      transcript,
+      confidence,
+      raw
     }
   ]);
 
-  return { ok: true, checkin: inserted.data };
+  return { ok: true, checkin: inserted.data, reply_text: replyText, transcript, confidence };
 });
 
 const port = Number(env.PORT || 3001);
