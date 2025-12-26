@@ -92,6 +92,8 @@ type Env = {
   OPENAI_API_KEY?: string;
   OPENAI_CHAT_MODEL?: string;
   OPENAI_STT_MODEL?: string;
+  OPENAI_PROMPT_ID?: string;
+  OPENAI_PROMPT_VERSION?: string;
 };
 
 function getEnv(): Env {
@@ -107,7 +109,9 @@ function getEnv(): Env {
     N8N_WEBHOOK_URL: process.env.N8N_WEBHOOK_URL?.trim() || undefined,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY?.trim() || undefined,
     OPENAI_CHAT_MODEL: process.env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
-    OPENAI_STT_MODEL: process.env.OPENAI_STT_MODEL?.trim() || "whisper-1"
+    OPENAI_STT_MODEL: process.env.OPENAI_STT_MODEL?.trim() || "whisper-1",
+    OPENAI_PROMPT_ID: process.env.OPENAI_PROMPT_ID?.trim() || undefined,
+    OPENAI_PROMPT_VERSION: process.env.OPENAI_PROMPT_VERSION?.trim() || "1"
   };
 }
 
@@ -197,8 +201,48 @@ async function openaiCuratorReply(params: {
   system: string;
   transcript: string;
   localeNow?: string;
+  language?: string;
+  timezone?: string;
 }): Promise<{ reply: string; raw: any }> {
-  const { apiKey, model, system, transcript } = params;
+  const { apiKey, model, system, transcript, language, timezone } = params;
+
+  // Preferred: use Prompt Builder ID if configured
+  if (env.OPENAI_PROMPT_ID) {
+    const payload = {
+      prompt: {
+        id: env.OPENAI_PROMPT_ID,
+        version: env.OPENAI_PROMPT_VERSION || "1",
+        variables: {
+          transcript: transcript || "",
+          language: language || "",
+          timezone: timezone || ""
+        }
+      }
+    };
+
+    const res = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = { raw: text };
+    }
+    if (!res.ok) {
+      throw new Error(`openai responses failed: ${res.status} ${res.statusText} ${text}`);
+    }
+    const reply = (json?.output_text || json?.output?.[0]?.content?.[0]?.text || "").toString().trim();
+    return { reply: reply || fallbackCuratorReply(transcript || null), raw: json };
+  }
+
+  // Fallback: classic chat.completions with inline system prompt
   const user = transcript?.trim()
     ? `Вот расшифровка голосового отчёта участника:\n\n${transcript}\n\nСгенерируй ответ куратора по правилам.`
     : "Участник отправил голосовое, но расшифровки нет. Сгенерируй мягкий ответ куратора и попроси в следующий раз чуть больше конкретики.";
@@ -760,7 +804,9 @@ app.post("/bot/checkin/voice", async (req, reply) => {
         apiKey: env.OPENAI_API_KEY,
         model: env.OPENAI_CHAT_MODEL || "gpt-4o-mini",
         system: CURATOR_SYSTEM_PROMPT,
-        transcript: transcript || ""
+        transcript: transcript || "",
+        language: "", // prompt may auto-detect; keep empty for now
+        timezone: user.timezone
       });
       replyText = chat.reply;
       raw = { stt: stt.raw, chat: chat.raw };
