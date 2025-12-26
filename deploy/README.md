@@ -32,7 +32,7 @@ cd /opt/earlyrise
 Создай env-файл для продакшена:
 - `deploy/env.production` (НЕ коммитить!)
 
-Пример см. `deploy/env.production.example`.
+Используй текущий `deploy/env.production` как источник переменных (на сервере файл лежит в `/opt/earlyrise/deploy/env.production`).
 
 ### 2) systemd units
 Скопируй юниты:
