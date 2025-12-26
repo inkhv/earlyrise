@@ -89,6 +89,9 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY: string;
   PORT: string;
   N8N_WEBHOOK_URL?: string;
+  OPENAI_API_KEY?: string;
+  OPENAI_CHAT_MODEL?: string;
+  OPENAI_STT_MODEL?: string;
 };
 
 function getEnv(): Env {
@@ -101,7 +104,10 @@ function getEnv(): Env {
     SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY!,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY!,
     PORT: process.env.PORT || "3001",
-    N8N_WEBHOOK_URL: process.env.N8N_WEBHOOK_URL?.trim() || undefined
+    N8N_WEBHOOK_URL: process.env.N8N_WEBHOOK_URL?.trim() || undefined,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY?.trim() || undefined,
+    OPENAI_CHAT_MODEL: process.env.OPENAI_CHAT_MODEL?.trim() || "gpt-4o-mini",
+    OPENAI_STT_MODEL: process.env.OPENAI_STT_MODEL?.trim() || "whisper-1"
   };
 }
 
@@ -156,6 +162,76 @@ async function postJson(url: string, body: unknown, timeoutMs = 25000): Promise<
   } finally {
     clearTimeout(t);
   }
+}
+
+async function openaiTranscribe(params: { apiKey: string; model: string; audioBytes: Uint8Array; mime: string }): Promise<{ transcript: string; raw: any }> {
+  const { apiKey, model, audioBytes, mime } = params;
+  const form = new FormData();
+  const blob = new Blob([audioBytes], { type: mime || "audio/ogg" });
+  // @ts-ignore - Node's File may not be typed, Blob works for fetch FormData
+  form.append("file", blob, "voice.ogg");
+  form.append("model", model);
+
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form
+  });
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok) {
+    throw new Error(`openai transcribe failed: ${res.status} ${res.statusText} ${text}`);
+  }
+  const transcript = (json?.text || json?.transcript || "").toString();
+  return { transcript, raw: json };
+}
+
+async function openaiCuratorReply(params: {
+  apiKey: string;
+  model: string;
+  system: string;
+  transcript: string;
+  localeNow?: string;
+}): Promise<{ reply: string; raw: any }> {
+  const { apiKey, model, system, transcript } = params;
+  const user = transcript?.trim()
+    ? `Вот расшифровка голосового отчёта участника:\n\n${transcript}\n\nСгенерируй ответ куратора по правилам.`
+    : "Участник отправил голосовое, но расшифровки нет. Сгенерируй мягкий ответ куратора и попроси в следующий раз чуть больше конкретики.";
+
+  const payload = {
+    model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    temperature: 0.6
+  };
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok) {
+    throw new Error(`openai chat failed: ${res.status} ${res.statusText} ${text}`);
+  }
+  const reply = (json?.choices?.[0]?.message?.content || "").toString().trim();
+  return { reply: reply || fallbackCuratorReply(transcript || null), raw: json };
 }
 
 function fallbackCuratorReply(transcript: string | null): string {
@@ -669,43 +745,38 @@ app.post("/bot/checkin/voice", async (req, reply) => {
   const voiceEnabled = settings.data.voice_feedback_enabled !== false;
   if (!voiceEnabled) {
     replyText = "Принял голосовое. (Сейчас фидбек по голосу отключён в настройках.)";
-  } else if (env.N8N_WEBHOOK_URL && audio_base64) {
-    const payload = {
-      event: "earlyrise_voice_checkin",
-      prompt: { system: CURATOR_SYSTEM_PROMPT },
-      user: {
-        telegram_user_id,
-        username: user.username,
-        first_name: user.first_name,
-        timezone: user.timezone
-      },
-      challenge: { id: challenge.id, title: challenge.title },
-      checkin: { id: inserted.data.id, checkin_at_utc: inserted.data.checkin_at_utc, duration: meta.duration },
-      telegram: { chat_id: meta.chat_id, message_id: meta.message_id, file_id },
-      audio: { mime: audio_mime, base64: audio_base64 }
-    };
-
+  } else if (env.OPENAI_API_KEY && audio_base64) {
     try {
-      const r = await postJson(env.N8N_WEBHOOK_URL, payload, 30000);
-      raw = { status: r.status, ok: r.ok, json: r.json ?? null, text: r.text };
-      const j = r.json || {};
-      transcript = typeof j.transcript === "string" ? j.transcript : null;
-      confidence = typeof j.confidence === "number" ? j.confidence : null;
-      replyText = typeof j.reply === "string" ? j.reply : null;
-      if (!replyText) replyText = fallbackCuratorReply(transcript);
+      const audioBytes = new Uint8Array(Buffer.from(audio_base64, "base64"));
+      const stt = await openaiTranscribe({
+        apiKey: env.OPENAI_API_KEY,
+        model: env.OPENAI_STT_MODEL || "whisper-1",
+        audioBytes,
+        mime: audio_mime || "audio/ogg"
+      });
+      transcript = stt.transcript || null;
+      confidence = null;
+      const chat = await openaiCuratorReply({
+        apiKey: env.OPENAI_API_KEY,
+        model: env.OPENAI_CHAT_MODEL || "gpt-4o-mini",
+        system: CURATOR_SYSTEM_PROMPT,
+        transcript: transcript || ""
+      });
+      replyText = chat.reply;
+      raw = { stt: stt.raw, chat: chat.raw };
     } catch (e: any) {
       raw = { error: true, message: e?.message || String(e) };
       replyText = fallbackCuratorReply(null);
     }
   } else {
-    // No n8n integration yet — return fallback (still useful)
+    // No OpenAI key/audio: still provide fallback
     replyText = fallbackCuratorReply(null);
   }
 
   await supabaseAdmin.from("voice_transcripts").insert([
     {
       checkin_id: inserted.data.id,
-      provider: "n8n",
+      provider: env.OPENAI_API_KEY ? "openai" : "mvp",
       transcript,
       confidence,
       raw
