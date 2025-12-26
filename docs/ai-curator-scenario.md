@@ -28,6 +28,24 @@
     - “Что я делаю в первые 10 минут после подъёма?”
     - “Какой один результат я хочу получить до X:XX?”
 
+### Контракт API → n8n (что приходит и что вернуть)
+
+API делает `POST` на `N8N_WEBHOOK_URL` с JSON примерно такого вида:
+
+- `event`: `"earlyrise_voice_checkin"`
+- `prompt.system`: системные инструкции куратора (можно хранить и внутри n8n, но в MVP приходит из API)
+- `user`: `{ telegram_user_id, username, first_name, timezone }`
+- `challenge`: `{ id, title }`
+- `checkin`: `{ id, checkin_at_utc, duration }`
+- `telegram`: `{ chat_id, message_id, file_id }`
+- `audio`: `{ mime, base64 }` (ogg/opus в base64)
+
+n8n должен вернуть JSON:
+- `reply` (string, обязательный): текст ответа куратора
+- `transcript` (string, опционально): расшифровка голоса
+- `confidence` (number, опционально)
+- `raw` (any, опционально): любые отладочные данные
+
 ### Примеры (ориентиры)
 
 #### Пример 1 — есть план
