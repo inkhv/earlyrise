@@ -1448,12 +1448,18 @@ export function registerAdminRoutes(app: FastifyInstance) {
         <div style="font-weight:700; margin-bottom:8px;">Последние чек-ины (200)</div>
         <div class="grid" id="checkins"></div>
       </div>
+      <div style="height: 12px"></div>
+      <div class="card">
+        <div style="font-weight:700; margin-bottom:8px;">Платежи (50)</div>
+        <div class="grid" id="payments"></div>
+      </div>
     </div>
     <script>
       const tokenEl = document.getElementById('token');
       const loadBtn = document.getElementById('load');
       const profileEl = document.getElementById('profile');
       const checkinsEl = document.getElementById('checkins');
+      const paymentsEl = document.getElementById('payments');
       const buddyCurrentEl = document.getElementById('buddyCurrent');
       const buddySelectEl = document.getElementById('buddySelect');
       const buddyHintEl = document.getElementById('buddyHint');
@@ -1465,6 +1471,7 @@ export function registerAdminRoutes(app: FastifyInstance) {
         loadBtn.disabled = true;
         profileEl.innerHTML = '';
         checkinsEl.innerHTML = '';
+        paymentsEl.innerHTML = '';
         buddyCurrentEl.textContent = '';
         buddySelectEl.innerHTML = '';
         buddyHintEl.textContent = '';
@@ -1515,6 +1522,26 @@ export function registerAdminRoutes(app: FastifyInstance) {
               '</tr>';
           }).join('');
           checkinsEl.innerHTML = '<table><thead><tr><th>checkin_at_utc</th><th>source</th><th>status</th></tr></thead><tbody>' + cRows + '</tbody></table>';
+
+          const pRows = (json.payments || []).map(p => {
+            const when = p.created_at || '';
+            const status = p.status || '';
+            const amount = (p.amount !== undefined && p.amount !== null) ? String(p.amount) : '';
+            const cur = p.currency || '';
+            const prov = p.provider || '';
+            const pid = p.provider_payment_id || '';
+            const plan = p.plan_code || '';
+            return '<tr>' +
+              '<td class="mono">' + when + '</td>' +
+              '<td>' + status + '</td>' +
+              '<td>' + amount + '</td>' +
+              '<td>' + cur + '</td>' +
+              '<td>' + prov + '</td>' +
+              '<td class="mono">' + (plan ? plan : '—') + '</td>' +
+              '<td class="mono">' + pid + '</td>' +
+              '</tr>';
+          }).join('');
+          paymentsEl.innerHTML = '<table><thead><tr><th>created_at</th><th>status</th><th>amount</th><th>currency</th><th>provider</th><th>plan_code</th><th>provider_payment_id</th></tr></thead><tbody>' + pRows + '</tbody></table>';
         } catch (e) {
           profileEl.innerHTML = '<div class="k">Ошибка</div><div class="v">' + (e && e.message ? e.message : String(e)) + '</div>';
         } finally {
@@ -1591,19 +1618,49 @@ export function registerAdminRoutes(app: FastifyInstance) {
     if (stats.error) throw stats.error;
     const checkins = await supabaseAdmin.from("checkins").select("*").eq("user_id", id).order("checkin_at_utc", { ascending: false }).limit(200);
     if (checkins.error) throw checkins.error;
+
+    // Payments (schema may be missing plan_code/order_id/access_days — fallback)
+    let paymentsRes: any = await supabaseAdmin
+      .from("payments")
+      .select("id, created_at, status, amount, currency, provider, provider_payment_id, plan_code, order_id, access_days")
+      .eq("user_id", id)
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (
+      paymentsRes.error &&
+      (isMissingColumnError(paymentsRes.error, "plan_code") ||
+        isMissingColumnError(paymentsRes.error, "order_id") ||
+        isMissingColumnError(paymentsRes.error, "access_days"))
+    ) {
+      paymentsRes = await supabaseAdmin
+        .from("payments")
+        .select("id, created_at, status, amount, currency, provider, provider_payment_id")
+        .eq("user_id", id)
+        .order("created_at", { ascending: false })
+        .limit(50);
+    }
+    if (paymentsRes.error) throw paymentsRes.error;
+
     const challenge = await getActiveChallenge();
-    if (!challenge) return { ok: true, user: user.data, stats: stats.data, checkins: checkins.data || [], buddy: null };
+    if (!challenge) return { ok: true, user: user.data, stats: stats.data, checkins: checkins.data || [], payments: paymentsRes.data || [], buddy: null };
     const partId = await getActiveParticipationId(id, challenge.id);
-    if (!partId) return { ok: true, user: user.data, stats: stats.data, checkins: checkins.data || [], buddy: null };
+    if (!partId) return { ok: true, user: user.data, stats: stats.data, checkins: checkins.data || [], payments: paymentsRes.data || [], buddy: null };
     const pair = await getBuddyUserForParticipation({ challenge_id: challenge.id, participation_id: partId });
-    if (!pair) return { ok: true, user: user.data, stats: stats.data, checkins: checkins.data || [], buddy: null };
+    if (!pair) return { ok: true, user: user.data, stats: stats.data, checkins: checkins.data || [], payments: paymentsRes.data || [], buddy: null };
     const buddyPart = await supabaseAdmin.from("participations").select("user_id").eq("id", pair.buddyParticipationId).single();
     if (buddyPart.error) throw buddyPart.error;
     const buddyUser = await supabaseAdmin.from("users").select("id, telegram_user_id, username, first_name").eq("id", buddyPart.data.user_id).single();
     if (buddyUser.error) throw buddyUser.error;
     const b = buddyUser.data as any;
     const display_name = b.username ? `@${b.username}` : b.first_name ? String(b.first_name) : `#${b.telegram_user_id ?? ""}`;
-    return { ok: true, user: user.data, stats: stats.data, checkins: checkins.data || [], buddy: { user_id: b.id, display_name } };
+    return {
+      ok: true,
+      user: user.data,
+      stats: stats.data,
+      checkins: checkins.data || [],
+      payments: paymentsRes.data || [],
+      buddy: { user_id: b.id, display_name }
+    };
   });
 
   // GET /admin/buddy/options (active challenge participants)
