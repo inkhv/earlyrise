@@ -309,6 +309,20 @@ async function hasPaidAccess(user_id: string, challenge_id: string): Promise<boo
   return (res.data || []).length > 0;
 }
 
+async function getLatestPayment(params: { user_id: string; challenge_id: string }): Promise<{ status: string; provider_payment_id: string | null; created_at: string } | null> {
+  const res = await supabaseAdmin
+    .from("payments")
+    .select("status, provider_payment_id, created_at")
+    .eq("user_id", params.user_id)
+    .eq("challenge_id", params.challenge_id)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (res.error) throw res.error;
+  const row: any = res.data?.[0];
+  if (!row) return null;
+  return { status: String(row.status || ""), provider_payment_id: row.provider_payment_id ? String(row.provider_payment_id) : null, created_at: String(row.created_at || "") };
+}
+
 async function getTrialUntilUtc(user_id: string, challenge_id: string): Promise<string | null> {
   const res = await supabaseAdmin
     .from("wallet_ledger")
@@ -324,6 +338,28 @@ async function getTrialUntilUtc(user_id: string, challenge_id: string): Promise<
   const start = new Date(row.created_at);
   const until = new Date(start.getTime() + 7 * 86400000);
   return until.toISOString();
+}
+
+async function ensureRefundNoticeSent(params: { user: any; challenge: any; provider_payment_id: string | null }): Promise<boolean> {
+  const { user, challenge, provider_payment_id } = params;
+  // Idempotency marker for this specific payment
+  const reason = provider_payment_id ? `refund_notice_sent:${provider_payment_id}` : "refund_notice_sent";
+  const existing = await supabaseAdmin
+    .from("wallet_ledger")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("challenge_id", challenge.id)
+    .eq("reason", reason)
+    .limit(1);
+  if (existing.error) throw existing.error;
+  if ((existing.data || []).length > 0) return false;
+  const ins = await supabaseAdmin
+    .from("wallet_ledger")
+    .insert([{ user_id: user.id, challenge_id: challenge.id, delta: 0, currency: "EUR", reason }])
+    .select("id")
+    .single();
+  if (ins.error) throw ins.error;
+  return true;
 }
 
 async function ensureTrialOfferSent(params: { user: any; challenge: any }): Promise<boolean> {
@@ -656,7 +692,26 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     const status: AccessStatus = paid ? "paid" : trialActive ? "trial" : "lead";
 
     let offer: any = null;
-    if (status === "lead") {
+    // Refund notice (automatic): if last payment is refunded and user is not currently paid.
+    if (!paid) {
+      const latestPayment = await getLatestPayment({ user_id: user.data.id, challenge_id: challenge.id });
+      if (latestPayment?.status === "refunded") {
+        const sent = await ensureRefundNoticeSent({
+          user: user.data,
+          challenge,
+          provider_payment_id: latestPayment.provider_payment_id
+        });
+        if (sent) {
+          offer = {
+            type: "refund_notice",
+            message:
+              "Вижу возврат по оплате.\n\n" +
+              "Если хочешь продолжить участие — открой /menu и нажми «💳 Оплатить участие»."
+          };
+        }
+      }
+    }
+    if (!offer && status === "lead") {
       // If offer was already sent proactively, still show the button in UI (but don't spam the message again).
       const existingOffer = await supabaseAdmin
         .from("wallet_ledger")

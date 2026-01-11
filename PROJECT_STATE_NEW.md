@@ -66,6 +66,10 @@
   - Update в Supabase таблицы `payments`: найти по `provider_payment_id = "tbank:<PaymentId>"`, поставить `status = paid|failed|pending` по `Status`
   - После этого бот начнёт видеть оплату, т.к. доступ проверяется по таблице `payments` (status='paid').
 - Важно по безопасности: секреты (`TBANK_PASSWORD`, `SUPABASE_SERVICE_ROLE_KEY`) держать в **Secrets n8n**, не в payload.
+- Refund / возвраты:
+  - При возврате Т‑Банк шлёт событие со `Status=REFUNDED`.
+  - n8n должен выставить `payments.status = refunded`.
+  - После этого бот **автоматически** покажет пользователю сообщение о возврате в `/menu`/`/me` (через `offer.message` из `GET /bot/me/:id`).
 
 ## AI / n8n
 - Voice webhook: POST в `N8N_WEBHOOK_URL` с `event=earlyrise_voice_checkin`, `mode="voice"`, payload включает текст транскрипта + метаданные.
