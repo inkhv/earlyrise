@@ -156,7 +156,7 @@ export function registerDmHandlers(params: {
     try {
       const me = await api<any>(`/bot/me/${ctx.from.id}`, { method: "GET" });
       const status = me?.json?.access?.status;
-      if (status === "lead") {
+      if (status === "lead" || status === "expired") {
         await ctx.reply("Похоже, у тебя пока нет доступа к участию. Давай начнём с меню — там оплата/пробная неделя/описание проекта.");
         return showMainMenu({ ctx, api });
       }
@@ -215,7 +215,7 @@ export function registerDmHandlers(params: {
       try {
         const me = await api<any>(`/bot/me/${ctx.from.id}`, { method: "GET" });
         const status = me?.json?.access?.status;
-        if (status === "lead") {
+        if (status === "lead" || status === "expired") {
           await ctx.reply("Пока не принимаю чек‑ины: у тебя нет доступа к участию. Открой меню — там описание/оплата/пробная неделя.");
           return showMainMenu({ ctx, api });
         }

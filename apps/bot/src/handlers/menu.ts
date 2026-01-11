@@ -3,7 +3,7 @@ import { InlineKeyboard, Keyboard } from "grammy";
 import type { ApiResponse } from "../apiClient.js";
 import { clearAwaitingTimezone, markAwaitingTimezone } from "../state.js";
 
-type AccessStatus = "paid" | "trial" | "lead";
+type AccessStatus = "paid" | "trial" | "lead" | "expired";
 
 type MeResponse = {
   user: any | null;
@@ -31,15 +31,15 @@ const CB = {
 } as const;
 
 const PAY = {
-  m1: "p:m1",
-  m2: "p:m2",
-  m3: "p:m3",
-  test: "p:test",
+  d30: "p:d30",
+  d60: "p:d60",
+  d90: "p:d90",
+  life: "p:life",
   back: "p:back"
 } as const;
 
 function isAccessStatus(x: any): x is AccessStatus {
-  return x === "paid" || x === "trial" || x === "lead";
+  return x === "paid" || x === "trial" || x === "lead" || x === "expired";
 }
 
 function accessStatusFromMe(me: MeResponse | null): AccessStatus {
@@ -49,6 +49,10 @@ function accessStatusFromMe(me: MeResponse | null): AccessStatus {
 
 function mainMenuKeyboard(params: { status: AccessStatus; hasTrialOffer: boolean }) {
   const k = new InlineKeyboard();
+  if (params.status === "expired") {
+    k.text("🔁 Восстановить участие", CB.pay).row();
+    return k;
+  }
   if (params.status === "paid" || params.status === "trial") {
     k.text("📊 Статистика", CB.stats).row();
     k.text("🌍 Часовой пояс", CB.tz).text("⏰ Время подъёма", CB.wake).row();
@@ -75,10 +79,10 @@ function wakeKeyboard() {
 
 function payKeyboard() {
   const k = new InlineKeyboard();
-  k.text("1 месяц — 490 ₽", PAY.m1).row();
-  k.text("2 месяца — 990 ₽", PAY.m2).row();
-  k.text("3 месяца — 1490 ₽", PAY.m3).row();
-  k.text("Тест — 5 ₽", PAY.test).row();
+  k.text("30 дней — 490 ₽", PAY.d30).row();
+  k.text("60 дней — 890 ₽", PAY.d60).row();
+  k.text("90 дней — 1400 ₽", PAY.d90).row();
+  k.text("Навсегда (поддержать проект) — 3000 ₽", PAY.life).row();
   k.text("← Назад", PAY.back);
   return k;
 }
@@ -119,11 +123,15 @@ export async function showMainMenu(params: {
       ? "Ты участник ✅"
       : status === "trial"
         ? "У тебя активна пробная неделя ✅"
+        : status === "expired"
+          ? "Доступ закончился ⛔️"
         : "Добро пожаловать! Похоже, ты ещё не участвуешь.";
 
   const hint =
     status === "paid" || status === "trial"
       ? `Твоя таймзона: ${tz}\n\nВыбери действие:`
+      : status === "expired"
+        ? "Чтобы восстановить участие, нажми «Восстановить участие» и выбери тариф."
       : "Выбери действие: узнать подробнее или оплатить участие.";
 
   const text = `${header}\n\n${hint}`;

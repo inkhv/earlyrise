@@ -42,6 +42,8 @@ export type Env = {
   VOICE_STORAGE_BUCKET?: string | undefined; // if set, store voice audio in Supabase Storage
   VOICE_STORAGE_RETENTION_HOURS?: string | undefined; // default 24
   ADMIN_DASHBOARD_TOKEN?: string | undefined;
+  MAIN_CHAT_ID?: string | undefined; // legacy name; can be used as group chat id (e.g. -100...)
+  EARLYRISE_GROUP_CHAT_ID?: string | undefined; // Telegram supergroup/chat id for kicking expired users (e.g. -100123...)
   TBANK_TERMINAL_KEY?: string | undefined;
   TBANK_PASSWORD?: string | undefined;
   TBANK_NOTIFICATION_URL?: string | undefined; // full URL for T-Bank webhook (overrides PUBLIC_BASE_URL+/payments/webhook)
@@ -76,6 +78,8 @@ function getEnv(): Env {
     VOICE_STORAGE_BUCKET: process.env.VOICE_STORAGE_BUCKET?.trim() || undefined,
     VOICE_STORAGE_RETENTION_HOURS: process.env.VOICE_STORAGE_RETENTION_HOURS?.trim() || undefined,
     ADMIN_DASHBOARD_TOKEN: process.env.ADMIN_DASHBOARD_TOKEN?.trim() || undefined,
+    MAIN_CHAT_ID: process.env.MAIN_CHAT_ID?.trim() || undefined,
+    EARLYRISE_GROUP_CHAT_ID: process.env.EARLYRISE_GROUP_CHAT_ID?.trim() || undefined,
     TBANK_TERMINAL_KEY: process.env.TBANK_TERMINAL_KEY?.trim() || undefined,
     TBANK_PASSWORD: process.env.TBANK_PASSWORD?.trim() || undefined,
     TBANK_NOTIFICATION_URL: process.env.TBANK_NOTIFICATION_URL?.trim() || undefined,

@@ -303,10 +303,58 @@ function fmtDateRu(date: Date): string {
   return `${d} ${m} ${y} года`;
 }
 
-async function hasPaidAccess(user_id: string, challenge_id: string): Promise<boolean> {
-  const res = await supabaseAdmin.from("payments").select("id").eq("user_id", user_id).eq("challenge_id", challenge_id).eq("status", "paid").limit(1);
+function paidDaysFromPlanOrAmount(plan_code: any, amountRub: any): { days: number | null; is_forever: boolean } {
+  const code = String(plan_code || "").trim().toLowerCase();
+  if (code === "life" || code === "forever" || code === "support") return { days: null, is_forever: true };
+  if (code === "d30" || code === "30" || code === "30d") return { days: 30, is_forever: false };
+  if (code === "d60" || code === "60" || code === "60d") return { days: 60, is_forever: false };
+  if (code === "d90" || code === "90" || code === "90d") return { days: 90, is_forever: false };
+
+  const a = Number(amountRub);
+  // Backward-compat + safety by price
+  if (a === 3000) return { days: null, is_forever: true };
+  if (a === 490) return { days: 30, is_forever: false };
+  if (a === 890) return { days: 60, is_forever: false };
+  if (a === 990) return { days: 60, is_forever: false };
+  if (a === 1400) return { days: 90, is_forever: false };
+  if (a === 1490) return { days: 90, is_forever: false };
+  return { days: null, is_forever: false };
+}
+
+async function getPaidAccessInfo(params: {
+  user_id: string;
+  challenge_id: string;
+}): Promise<{ is_active_paid: boolean; has_any_paid: boolean; is_forever: boolean; paid_until_utc: string | null }> {
+  const { user_id, challenge_id } = params;
+  const res = await supabaseAdmin
+    .from("payments")
+    .select("created_at, plan_code, amount")
+    .eq("user_id", user_id)
+    .eq("challenge_id", challenge_id)
+    .eq("status", "paid");
   if (res.error) throw res.error;
-  return (res.data || []).length > 0;
+  const rows = res.data || [];
+  const has_any_paid = rows.length > 0;
+  if (!has_any_paid) return { is_active_paid: false, has_any_paid: false, is_forever: false, paid_until_utc: null };
+
+  let is_forever = false;
+  let maxUntil: Date | null = null;
+  for (const r of rows as any[]) {
+    const info = paidDaysFromPlanOrAmount((r as any).plan_code, (r as any).amount);
+    if (info.is_forever) {
+      is_forever = true;
+      continue;
+    }
+    if (info.days && (r as any).created_at) {
+      const start = new Date(String((r as any).created_at));
+      const until = new Date(start.getTime() + info.days * 86400000);
+      if (!maxUntil || until.getTime() > maxUntil.getTime()) maxUntil = until;
+    }
+  }
+  if (is_forever) return { is_active_paid: true, has_any_paid: true, is_forever: true, paid_until_utc: null };
+  const paid_until_utc = maxUntil ? maxUntil.toISOString() : null;
+  const is_active_paid = paid_until_utc ? isFutureIso(paid_until_utc) : false;
+  return { is_active_paid, has_any_paid: true, is_forever: false, paid_until_utc };
 }
 
 async function getLatestPayment(params: { user_id: string; challenge_id: string }): Promise<{ status: string; provider_payment_id: string | null; created_at: string } | null> {
@@ -548,9 +596,9 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       return { ok: false, error: "no_active_challenge", message: "Сейчас нет активного челленджа" };
     }
 
-    // If already paid, do not create another payment
-    const alreadyPaid = await hasPaidAccess(userRes.data.id, challenge.id);
-    if (alreadyPaid) {
+    // If currently paid, do not create another payment (bot UI also hides pay button for paid users)
+    const accessNow = await getPaidAccessInfo({ user_id: userRes.data.id, challenge_id: challenge.id });
+    if (accessNow.is_active_paid) {
       return { ok: false, error: "already_paid", message: "У тебя уже есть оплаченный доступ ✅" };
     }
 
@@ -573,32 +621,23 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       };
     }
 
-    const TARIFFS: Record<
-      string,
-      { title: string; amount_rub: number; months?: number; is_test?: boolean }
-    > = {
-      m1: { title: "1 месяц", amount_rub: 490, months: 1 },
-      m2: { title: "2 месяца", amount_rub: 990, months: 2 },
-      m3: { title: "3 месяца", amount_rub: 1490, months: 3 },
-      test: { title: "тест", amount_rub: 5, is_test: true }
+    const TARIFFS: Record<string, { title: string; amount_rub: number; days?: number; is_forever?: boolean }> = {
+      d30: { title: "30 дней", amount_rub: 490, days: 30 },
+      d60: { title: "60 дней", amount_rub: 890, days: 60 },
+      d90: { title: "90 дней", amount_rub: 1400, days: 90 },
+      life: { title: "Навсегда (поддержать проект)", amount_rub: 3000, is_forever: true }
     };
 
-    const enableTest = String(env.PAY_ENABLE_TEST_TARIFF || "").toLowerCase() === "true";
     const selected = plan_code ? TARIFFS[plan_code] : null;
 
     const amountRub = (() => {
       if (selected) {
-        if (selected.is_test && !enableTest) return NaN;
         return selected.amount_rub;
       }
       // Backward compatible fallback (old /pay without plan)
       return Number(env.PAY_PRICE_RUB || "990");
     })();
     if (!Number.isFinite(amountRub) || amountRub <= 0) {
-      if (plan_code && selected?.is_test && !enableTest) {
-        reply.code(403);
-        return { ok: false, error: "test_tariff_disabled", message: "Тестовый тариф выключен." };
-      }
       reply.code(500);
       return { ok: false, error: "invalid_price", message: "Некорректная цена PAY_PRICE_RUB" };
     }
@@ -618,7 +657,7 @@ export function registerCheckinRoutes(app: FastifyInstance) {
         telegram_user_id: String(telegram_user_id),
         user_id: userRes.data.id,
         challenge_id: challenge.id,
-        plan_code: safePlan
+        plan_code: selected ? plan_code : safePlan
       }
     };
     initPayload.Token = tbankToken(initPayload, env.TBANK_PASSWORD);
@@ -650,21 +689,28 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     }
 
     // Record payment in DB. Provider enum does not include 'tbank' in schema; keep provider='manual' and prefix payment id.
-    const ins = await supabaseAdmin
-      .from("payments")
-      .insert([
-        {
-          user_id: userRes.data.id,
-          challenge_id: challenge.id,
-          provider: "manual",
-          amount: amountRub,
-          currency: "RUB",
-          status: "pending",
-          provider_payment_id: `tbank:${paymentId}`
-        }
-      ])
-      .select("*")
-      .single();
+    const basePaymentRow: any = {
+      user_id: userRes.data.id,
+      challenge_id: challenge.id,
+      provider: "manual",
+      amount: amountRub,
+      currency: "RUB",
+      status: "pending",
+      provider_payment_id: `tbank:${paymentId}`
+    };
+    const extendedPaymentRow: any = {
+      ...basePaymentRow,
+      plan_code: selected ? plan_code : safePlan,
+      order_id: orderId,
+      access_days: selected?.days ?? null
+    };
+    let ins: any = await supabaseAdmin.from("payments").insert([extendedPaymentRow]).select("*").single();
+    if (ins.error) {
+      const msg = String((ins.error as any).message || (ins.error as any).details || ins.error);
+      if (/column .* does not exist/i.test(msg)) {
+        ins = await supabaseAdmin.from("payments").insert([basePaymentRow]).select("*").single();
+      }
+    }
     if (ins.error) throw ins.error;
 
     return {
@@ -686,14 +732,20 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       await touchUserLastSeen(user.data.id);
       return { user: user.data, stats: stats.data, access: { status: "lead" }, offer: null };
     }
-    const paid = await hasPaidAccess(user.data.id, challenge.id);
+    const paidInfo = await getPaidAccessInfo({ user_id: user.data.id, challenge_id: challenge.id });
     const trialUntil = await getTrialUntilUtc(user.data.id, challenge.id);
     const trialActive = isFutureIso(trialUntil);
-    const status: AccessStatus = paid ? "paid" : trialActive ? "trial" : "lead";
+    const status: AccessStatus = paidInfo.is_active_paid
+      ? "paid"
+      : trialActive
+        ? "trial"
+        : paidInfo.has_any_paid
+          ? "expired"
+          : "lead";
 
     let offer: any = null;
     // Refund notice (automatic): if last payment is refunded and user is not currently paid.
-    if (!paid) {
+    if (!paidInfo.is_active_paid) {
       const latestPayment = await getLatestPayment({ user_id: user.data.id, challenge_id: challenge.id });
       if (latestPayment?.status === "refunded") {
         const sent = await ensureRefundNoticeSent({
@@ -740,13 +792,30 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       }
     }
 
+    if (!offer && status === "expired") {
+      offer = {
+        type: "renew_prompt",
+        message: "Срок участия закончился ⛔️\n\nОткрой /menu и нажми «Восстановить участие», чтобы выбрать тариф."
+      };
+    }
+
     const payload = {
       user: user.data,
       stats: stats.data,
       challenge: { id: challenge.id, title: challenge.title },
-      access: { status, trial_until_utc: trialUntil },
+      access: { status, trial_until_utc: trialUntil, paid_until_utc: paidInfo.paid_until_utc, paid_forever: paidInfo.is_forever },
       offer
     };
+    // Best-effort store computed paid_until for admin/cron usage (ignore if column missing)
+    try {
+      const patch: any = { paid_until: paidInfo.is_forever ? null : paidInfo.paid_until_utc };
+      const upd = await supabaseAdmin.from("users").update(patch).eq("id", user.data.id);
+      if (upd.error && isMissingColumnError(upd.error, "paid_until")) {
+        // ignore for older schemas
+      }
+    } catch {
+      // ignore
+    }
     await touchUserLastSeen(user.data.id);
     return payload;
   });
@@ -765,8 +834,8 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       reply.code(409);
       return { ok: false, error: "no_active_challenge", message: "Сейчас нет активного челленджа" };
     }
-    const paid = await hasPaidAccess(userRes.data.id, challenge.id);
-    if (paid) {
+    const paidInfo = await getPaidAccessInfo({ user_id: userRes.data.id, challenge_id: challenge.id });
+    if (paidInfo.is_active_paid) {
       return { ok: false, error: "already_paid", message: "У тебя уже есть оплаченный доступ ✅" };
     }
     const trialUntil = await getTrialUntilUtc(userRes.data.id, challenge.id);

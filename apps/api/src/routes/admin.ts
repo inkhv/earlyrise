@@ -125,6 +125,71 @@ async function telegramSendMessage(params: { chat_id: number | string; text: str
   return json;
 }
 
+async function telegramBanChatMember(params: { chat_id: number | string; user_id: number; until_date?: number }) {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    const err: any = new Error("Telegram bot token is not configured on API");
+    err.statusCode = 501;
+    throw err;
+  }
+  const payload: any = {
+    chat_id: params.chat_id,
+    user_id: params.user_id,
+    revoke_messages: false
+  };
+  if (Number.isFinite(params.until_date)) payload.until_date = params.until_date;
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/banChatMember`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok || json?.ok === false) {
+    const err: any = new Error(`Telegram banChatMember failed: ${res.status}`);
+    err.statusCode = 502;
+    err.details = json;
+    throw err;
+  }
+  return json;
+}
+
+async function telegramUnbanChatMember(params: { chat_id: number | string; user_id: number }) {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    const err: any = new Error("Telegram bot token is not configured on API");
+    err.statusCode = 501;
+    throw err;
+  }
+  const payload: any = {
+    chat_id: params.chat_id,
+    user_id: params.user_id,
+    only_if_banned: true
+  };
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/unbanChatMember`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok || json?.ok === false) {
+    const err: any = new Error(`Telegram unbanChatMember failed: ${res.status}`);
+    err.statusCode = 502;
+    err.details = json;
+    throw err;
+  }
+  return json;
+}
+
 function sleepMs(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -825,6 +890,293 @@ export function registerAdminRoutes(app: FastifyInstance) {
       sent: dry_run ? 0 : sent,
       failed: dry_run ? 0 : failed,
       sample: toSend.slice(0, 5).map((u: any) => ({ telegram_user_id: u.telegram_user_id, user_id: u.id }))
+    };
+  });
+
+  // POST /admin/subscriptions/run
+  // body (optional): { dry_run?: boolean, limit?: number, chat_id?: string|number }
+  // Purpose:
+  // - compute paid_until per user based on paid payments + plan_code/amount
+  // - send reminder 2 days before end
+  // - in the end day: prompt to renew
+  // - after +1 day: remove from group chat
+  // Notes:
+  // - "mark unpaid" is implemented via participations.left_at (so user is treated as non-participant)
+  app.post("/admin/subscriptions/run", async (req, reply) => {
+    await requireDashboard(req);
+    const body = (req.body || {}) as any;
+    const dry_run = Boolean(body.dry_run);
+    const limit = Math.min(2000, Math.max(50, Number(body.limit || 1000)));
+
+    const chat_id_str = String(body.chat_id ?? env.EARLYRISE_GROUP_CHAT_ID ?? env.MAIN_CHAT_ID ?? "").trim();
+    const chat_id = chat_id_str && /^-?\d+$/.test(chat_id_str) ? chat_id_str : "";
+
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const dayMs = 86400000;
+
+    const paidDaysFromPlanOrAmount = (plan_code: any, amountRub: any): { days: number | null; is_forever: boolean } => {
+      const code = String(plan_code || "").trim().toLowerCase();
+      if (code === "life" || code === "forever" || code === "support") return { days: null, is_forever: true };
+      if (code === "d30" || code === "30" || code === "30d") return { days: 30, is_forever: false };
+      if (code === "d60" || code === "60" || code === "60d") return { days: 60, is_forever: false };
+      if (code === "d90" || code === "90" || code === "90d") return { days: 90, is_forever: false };
+      const a = Number(amountRub);
+      if (a === 3000) return { days: null, is_forever: true };
+      if (a === 490) return { days: 30, is_forever: false };
+      if (a === 890) return { days: 60, is_forever: false };
+      if (a === 990) return { days: 60, is_forever: false };
+      if (a === 1400) return { days: 90, is_forever: false };
+      if (a === 1490) return { days: 90, is_forever: false };
+      return { days: null, is_forever: false };
+    };
+
+    const fmtDateRu = (iso: string) => {
+      const d = new Date(iso);
+      const months = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря"
+      ];
+      return `${d.getUTCDate()} ${months[d.getUTCMonth()] || ""} ${d.getUTCFullYear()} года`;
+    };
+
+    // All participations (incl left_at): we need to kick even after left_at is set
+    const parts = await supabaseAdmin.from("participations").select("user_id, left_at").eq("challenge_id", challenge.id).limit(limit);
+    if (parts.error) throw parts.error;
+    const partRows = (parts.data || []) as any[];
+    const userIds = Array.from(new Set(partRows.map((p) => String(p.user_id)).filter(Boolean)));
+    const activePartSet = new Set<string>(partRows.filter((p) => !p.left_at).map((p) => String(p.user_id)));
+    if (userIds.length === 0) return { ok: true, dry_run, attempted: 0, message: "no_participants" };
+
+    const hasLedgerMarker = async (user_id: string, reason: string) => {
+      const r = await supabaseAdmin
+        .from("wallet_ledger")
+        .select("id")
+        .eq("challenge_id", challenge.id)
+        .eq("user_id", user_id)
+        .eq("reason", reason)
+        .limit(1);
+      if (r.error) throw r.error;
+      return (r.data || []).length > 0;
+    };
+    const putLedgerMarker = async (user_id: string, reason: string) => {
+      const ins = await supabaseAdmin.from("wallet_ledger").insert([{ user_id, challenge_id: challenge.id, delta: 0, currency: "EUR", reason }]);
+      if (ins.error) {
+        // no unique constraint; ignore best-effort
+      }
+    };
+
+    // Load users (subscription columns may not exist on older schema; fallback)
+    let usersRes: any = await supabaseAdmin
+      .from("users")
+      .select("id, telegram_user_id, paid_until, next_payment_reminder_at, reminder_2d_sent_at, expiry_prompt_sent_at, kicked_from_chat_at")
+      .in("id", userIds as any);
+    if (usersRes.error && isMissingColumnError(usersRes.error, "paid_until")) {
+      usersRes = await supabaseAdmin.from("users").select("id, telegram_user_id").in("id", userIds as any);
+    }
+    if (usersRes.error) throw usersRes.error;
+    const users = (usersRes.data || []).filter((u: any) => Number.isFinite(Number(u.telegram_user_id)));
+    if (users.length === 0) return { ok: true, dry_run, attempted: 0, message: "no_users" };
+
+    // Paid payments for these users
+    const paidRes = await supabaseAdmin
+      .from("payments")
+      .select("user_id, created_at, plan_code, amount")
+      .eq("challenge_id", challenge.id)
+      .eq("status", "paid")
+      .in("user_id", users.map((u: any) => String(u.id)) as any);
+    if (paidRes.error) throw paidRes.error;
+    const paidRows = (paidRes.data || []) as any[];
+
+    // Compute max paid_until per user
+    const foreverSet = new Set<string>();
+    const maxUntilMs = new Map<string, number>();
+    for (const r of paidRows) {
+      const uid = String(r.user_id || "");
+      if (!uid) continue;
+      const info = paidDaysFromPlanOrAmount(r.plan_code, r.amount);
+      if (info.is_forever) {
+        foreverSet.add(uid);
+        continue;
+      }
+      if (!info.days || !r.created_at) continue;
+      const startMs = Date.parse(String(r.created_at));
+      if (!Number.isFinite(startMs)) continue;
+      const untilMs = startMs + info.days * dayMs;
+      const prev = maxUntilMs.get(uid);
+      if (prev === undefined || untilMs > prev) maxUntilMs.set(uid, untilMs);
+    }
+
+    let computed = 0;
+    let reminderCandidates = 0;
+    let remindersSent = 0;
+    let expiryCandidates = 0;
+    let expiryPromptsSent = 0;
+    let markedUnpaid = 0;
+    let kicked = 0;
+    const errors: any[] = [];
+
+    for (const u of users) {
+      const uid = String(u.id);
+      computed += 1;
+      const isForever = foreverSet.has(uid);
+      const paidUntilMs = isForever ? null : maxUntilMs.get(uid) ?? null;
+      const paidUntilIso = paidUntilMs ? new Date(paidUntilMs).toISOString() : null;
+      const reminderAtMs = paidUntilMs ? paidUntilMs - 2 * dayMs : null;
+      const reminderAtIso = reminderAtMs ? new Date(reminderAtMs).toISOString() : null;
+
+      // Persist computed dates (best-effort; only if columns exist)
+      if (!dry_run && "paid_until" in u) {
+        try {
+          const upd = await supabaseAdmin
+            .from("users")
+            .update({ paid_until: paidUntilIso, next_payment_reminder_at: reminderAtIso })
+            .eq("id", uid);
+          if (upd.error && !isMissingColumnError(upd.error, "paid_until")) throw upd.error;
+        } catch (e: any) {
+          if (errors.length < 10) errors.push({ user_id: uid, step: "update_users_dates", message: e?.message || String(e) });
+        }
+      }
+
+      if (isForever || !paidUntilMs) continue;
+
+      // Reminder 2 days before end
+      if (reminderAtMs && nowMs >= reminderAtMs && nowMs < paidUntilMs) {
+        reminderCandidates += 1;
+        const marker = `sub:reminder_2d_sent:${paidUntilIso}`;
+        const sentAtMs = (u as any).reminder_2d_sent_at ? Date.parse(String((u as any).reminder_2d_sent_at)) : NaN;
+        const alreadySentByCol = Number.isFinite(sentAtMs) && sentAtMs >= reminderAtMs;
+        const alreadySent = alreadySentByCol || (!(("reminder_2d_sent_at" in u) || ("paid_until" in u)) ? await hasLedgerMarker(uid, marker) : false);
+        if (!alreadySent) {
+          if (!dry_run) {
+            try {
+              await telegramSendMessage({
+                chat_id: Number(u.telegram_user_id),
+                text:
+                  `Напоминание: твой период участия заканчивается ${fmtDateRu(paidUntilIso!)}.\n\n` +
+                  `Чтобы продлить, открой /menu и выбери тариф.`
+              });
+              if ("reminder_2d_sent_at" in u) {
+                const upd = await supabaseAdmin.from("users").update({ reminder_2d_sent_at: nowIso }).eq("id", uid);
+                if (upd.error && !isMissingColumnError(upd.error, "reminder_2d_sent_at")) throw upd.error;
+              } else {
+                await putLedgerMarker(uid, marker);
+              }
+              remindersSent += 1;
+            } catch (e: any) {
+              if (errors.length < 20) errors.push({ telegram_user_id: u.telegram_user_id, step: "send_reminder_2d", message: e?.message || String(e), details: e?.details });
+            }
+          }
+        }
+      }
+
+      // End day prompt (when expired, but less than +1 day)
+      if (nowMs >= paidUntilMs && nowMs < paidUntilMs + dayMs) {
+        expiryCandidates += 1;
+        const marker = `sub:expiry_prompt_sent:${paidUntilIso}`;
+        const sentAtMs = (u as any).expiry_prompt_sent_at ? Date.parse(String((u as any).expiry_prompt_sent_at)) : NaN;
+        const alreadySentByCol = Number.isFinite(sentAtMs) && sentAtMs >= paidUntilMs;
+        const alreadySent = alreadySentByCol || (!(("expiry_prompt_sent_at" in u) || ("paid_until" in u)) ? await hasLedgerMarker(uid, marker) : false);
+        if (!alreadySent) {
+          if (!dry_run) {
+            try {
+              await telegramSendMessage({
+                chat_id: Number(u.telegram_user_id),
+                text:
+                  "Доступ закончился ⛔️\n\n" +
+                  "Чтобы продолжить участие, открой /menu и нажми «Восстановить участие»."
+              });
+              if ("expiry_prompt_sent_at" in u) {
+                const upd = await supabaseAdmin.from("users").update({ expiry_prompt_sent_at: nowIso, last_renewal_prompt_at: nowIso }).eq("id", uid);
+                if (upd.error && !isMissingColumnError(upd.error, "expiry_prompt_sent_at")) throw upd.error;
+              } else {
+                await putLedgerMarker(uid, marker);
+              }
+              expiryPromptsSent += 1;
+            } catch (e: any) {
+              if (errors.length < 20) errors.push({ telegram_user_id: u.telegram_user_id, step: "send_expiry_prompt", message: e?.message || String(e), details: e?.details });
+            }
+          }
+        }
+
+        // Mark unpaid (stop participation) as soon as period ends
+        if (activePartSet.has(uid)) {
+          if (!dry_run) {
+            const upd = await supabaseAdmin
+              .from("participations")
+              .update({ left_at: nowIso })
+              .eq("challenge_id", challenge.id)
+              .eq("user_id", uid)
+              .is("left_at", null);
+            if (upd.error) {
+              if (errors.length < 20) errors.push({ user_id: uid, step: "mark_left_at", message: (upd.error as any).message || String(upd.error) });
+            } else {
+              markedUnpaid += 1;
+              activePartSet.delete(uid);
+            }
+          }
+        }
+      }
+
+      // Kick from group next day
+      if (nowMs >= paidUntilMs + dayMs) {
+        const marker = `sub:kicked:${paidUntilIso}`;
+        const kickedAtMs = (u as any).kicked_from_chat_at ? Date.parse(String((u as any).kicked_from_chat_at)) : NaN;
+        const alreadyKickedByCol = Number.isFinite(kickedAtMs) && kickedAtMs >= paidUntilMs + dayMs;
+        const alreadyKicked = alreadyKickedByCol || (!(("kicked_from_chat_at" in u) || ("paid_until" in u)) ? await hasLedgerMarker(uid, marker) : false);
+        if (!alreadyKicked) {
+          if (!chat_id) {
+            if (errors.length < 5) errors.push({ step: "kick_missing_chat_id", message: "Set EARLYRISE_GROUP_CHAT_ID or MAIN_CHAT_ID (negative -100... recommended)" });
+          } else if (!dry_run) {
+            try {
+              // Ban for 60 seconds, then unban -> user is removed but can re-join later.
+              const untilDate = Math.floor(nowMs / 1000) + 60;
+              await telegramBanChatMember({ chat_id, user_id: Number(u.telegram_user_id), until_date: untilDate });
+              await telegramUnbanChatMember({ chat_id, user_id: Number(u.telegram_user_id) });
+              if ("kicked_from_chat_at" in u) {
+                const upd = await supabaseAdmin.from("users").update({ kicked_from_chat_at: nowIso }).eq("id", uid);
+                if (upd.error && !isMissingColumnError(upd.error, "kicked_from_chat_at")) throw upd.error;
+              } else {
+                await putLedgerMarker(uid, marker);
+              }
+              kicked += 1;
+            } catch (e: any) {
+              if (errors.length < 20) errors.push({ telegram_user_id: u.telegram_user_id, step: "kick", message: e?.message || String(e), details: e?.details });
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      dry_run,
+      challenge_id: challenge.id,
+      chat_id: chat_id || null,
+      computed_users: computed,
+      reminder_candidates: reminderCandidates,
+      reminders_sent: dry_run ? 0 : remindersSent,
+      expiry_candidates: expiryCandidates,
+      expiry_prompts_sent: dry_run ? 0 : expiryPromptsSent,
+      participations_marked_left: dry_run ? 0 : markedUnpaid,
+      kicked: dry_run ? 0 : kicked,
+      errors
     };
   });
 
