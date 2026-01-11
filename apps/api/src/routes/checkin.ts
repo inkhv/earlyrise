@@ -56,7 +56,16 @@ function tbankToken(payload: Record<string, any>, password: string): string {
   delete p.token;
   p.Password = password;
   const keys = Object.keys(p).sort();
-  const concat = keys.map((k) => (p[k] === undefined || p[k] === null ? "" : String(p[k]))).join("");
+  // Note: some fields (e.g. DATA) can be objects. The provider expects scalar values in token calculation.
+  // To avoid "[object Object]" issues, treat non-null objects as empty string.
+  const concat = keys
+    .map((k) => {
+      const v = p[k];
+      if (v === undefined || v === null) return "";
+      if (typeof v === "object") return "";
+      return String(v);
+    })
+    .join("");
   return sha256Hex(concat);
 }
 
@@ -592,7 +601,9 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     }
     if (!r.ok || !json?.Success) {
       reply.code(502);
-      return { ok: false, error: "tbank_init_failed", message: json?.Message || json?.Details || "Ошибка инициализации платежа", raw: json };
+      const msgParts = [json?.Message, json?.Details, json?.ErrorCode].filter((x) => typeof x === "string" && x.trim());
+      const message = msgParts.length ? msgParts.join(" · ") : "Ошибка инициализации платежа";
+      return { ok: false, error: "tbank_init_failed", message, raw: json };
     }
 
     const paymentId = String(json.PaymentId || "");
