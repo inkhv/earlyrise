@@ -44,6 +44,7 @@ export type Env = {
   ADMIN_DASHBOARD_TOKEN?: string | undefined;
   TBANK_TERMINAL_KEY?: string | undefined;
   TBANK_PASSWORD?: string | undefined;
+  TBANK_NOTIFICATION_URL?: string | undefined; // full URL for T-Bank webhook (overrides PUBLIC_BASE_URL+/payments/webhook)
   PUBLIC_BASE_URL?: string | undefined; // public URL for webhooks (e.g. https://example.com or http://<ip>:5000)
   PAY_PRICE_RUB?: string | undefined; // integer rubles, e.g. "990"
   PAY_ENABLE_TEST_TARIFF?: string | undefined; // "true" to allow test 5 RUB tariff
@@ -77,6 +78,7 @@ function getEnv(): Env {
     ADMIN_DASHBOARD_TOKEN: process.env.ADMIN_DASHBOARD_TOKEN?.trim() || undefined,
     TBANK_TERMINAL_KEY: process.env.TBANK_TERMINAL_KEY?.trim() || undefined,
     TBANK_PASSWORD: process.env.TBANK_PASSWORD?.trim() || undefined,
+    TBANK_NOTIFICATION_URL: process.env.TBANK_NOTIFICATION_URL?.trim() || undefined,
     PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL?.trim() || undefined,
     PAY_PRICE_RUB: process.env.PAY_PRICE_RUB?.trim() || undefined,
     PAY_ENABLE_TEST_TARIFF: process.env.PAY_ENABLE_TEST_TARIFF?.trim() || undefined,

@@ -513,9 +513,19 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       reply.code(501);
       return { ok: false, error: "tbank_not_configured", message: "Оплата пока не настроена (нет ключей Т‑Банка)." };
     }
-    if (!env.PUBLIC_BASE_URL) {
+    // Webhook target:
+    // - preferred: TBANK_NOTIFICATION_URL (e.g. n8n webhook URL)
+    // - fallback: PUBLIC_BASE_URL + /payments/webhook (your public API domain)
+    const notificationUrl =
+      env.TBANK_NOTIFICATION_URL?.trim() ||
+      (env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/payments/webhook` : "");
+    if (!notificationUrl) {
       reply.code(501);
-      return { ok: false, error: "public_base_url_missing", message: "Оплата пока не настроена (нет PUBLIC_BASE_URL для вебхука)." };
+      return {
+        ok: false,
+        error: "notification_url_missing",
+        message: "Оплата пока не настроена (нет TBANK_NOTIFICATION_URL или PUBLIC_BASE_URL для вебхука)."
+      };
     }
 
     const TARIFFS: Record<
@@ -552,8 +562,6 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     const safePlan = plan_code ? plan_code.replace(/[^\w-]/g, "").slice(0, 16) : "default";
     const orderId = `er_${challenge.id.slice(0, 8)}_${telegram_user_id}_${safePlan}_${Date.now()}`;
     const description = selected ? `EarlyRise: ${selected.title}` : `EarlyRise: доступ к челленджу`;
-    const notificationUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/payments/webhook`;
-
     const initPayload: any = {
       TerminalKey: env.TBANK_TERMINAL_KEY,
       Amount: amountKopeks,

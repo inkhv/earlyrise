@@ -56,6 +56,17 @@
 - Миграции: `20251227000100_standard_mvp.sql`, `20251227000300_voice_storage.sql` применены
 - Storage: bucket `earlyrise-voice`, retention 24h (cron в VPS)
 
+## Оплата (T‑Банк) — webhook через n8n (если API не публичный)
+- Проблема: `earlyrise-api` слушает локально/за firewall, и Т‑Банк не может достучаться до `POST /payments/webhook`.
+- Решение: указать **`TBANK_NOTIFICATION_URL`** как **webhook n8n**, чтобы Т‑Банк слал уведомления в n8n.
+  - В API `POST /bot/pay/create` будет отдавать `NotificationURL=TBANK_NOTIFICATION_URL` (если задан), иначе использует `PUBLIC_BASE_URL + /payments/webhook`.
+- В n8n поток:
+  - Webhook (принимает тело уведомления Т‑Банка)
+  - (опционально) валидация `Token` по алгоритму T‑Bank (sha256 конкатенации + Password)
+  - Update в Supabase таблицы `payments`: найти по `provider_payment_id = "tbank:<PaymentId>"`, поставить `status = paid|failed|pending` по `Status`
+  - После этого бот начнёт видеть оплату, т.к. доступ проверяется по таблице `payments` (status='paid').
+- Важно по безопасности: секреты (`TBANK_PASSWORD`, `SUPABASE_SERVICE_ROLE_KEY`) держать в **Secrets n8n**, не в payload.
+
 ## AI / n8n
 - Voice webhook: POST в `N8N_WEBHOOK_URL` с `event=earlyrise_voice_checkin`, `mode="voice"`, payload включает текст транскрипта + метаданные.
 - Text webhook: POST в `N8N_TEXT_WEBHOOK_URL` (fallback: `N8N_WEBHOOK_URL`) с `event=earlyrise_text_checkin`, `mode="text"`.
