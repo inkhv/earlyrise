@@ -36,7 +36,21 @@ Seed: `pnpm supabase:seed`.
 На VPS настроен systemd timer, который раз в минуту подтягивает `main` из GitHub и перезапускает сервисы при появлении нового коммита.
 См. `deploy/README.md`.
 
+## Voice → n8n (STT/feedback)
+
+Если OpenAI на VPS блокируется по региону, API может вызывать n8n по `N8N_WEBHOOK_URL` и ждать JSON:
+- `transcript`: string
+- `confidence`: number|null (опционально)
+- `reply`: string (опционально; если нет — API отправит fallback-ответ)
+
+Рекомендации:
+- Используй **production** webhook URL (не `webhook-test`) и активируй workflow в n8n.
+- Чтобы всегда предпочитать n8n (без попытки OpenAI на VPS), поставь `VOICE_PROVIDER=n8n`.
+
 ## Specs
 - Bot spec (включая механику напарников): `docs/bot-spec.md`
+- AI-куратор: `docs/ai-curator-scenario.md`
+- Сценарии теста до 08-01: `docs/test-scenarios-jan8.md`
+- Оплата (MVP): `docs/payments-mvp.md`
 
 

@@ -15,7 +15,8 @@
     "@earlyrise/shared": "workspace:*",
     "@earlyrise/telegram": "workspace:*",
     "@earlyrise/stt-nhn": "workspace:*",
-    "grammy": "1.35.0"
+    "grammy": "1.35.0",
+    "tz-lookup": "6.1.25"
   },
   "devDependencies": {
     "@types/node": "22.10.2",

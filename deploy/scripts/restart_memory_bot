@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@194.67.84.159 'cd /opt/earlyrise && bash deploy/scripts/reset-user-today.sh 247238054'
+

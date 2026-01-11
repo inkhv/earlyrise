@@ -4,7 +4,8 @@
     "outDir": "dist",
     "rootDir": "src",
     "types": ["node"],
-    "moduleResolution": "Bundler"
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
   },
   "include": ["src/**/*.ts"]
 }
