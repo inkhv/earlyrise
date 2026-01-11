@@ -44,6 +44,7 @@ export type Env = {
   ADMIN_DASHBOARD_TOKEN?: string | undefined;
   MAIN_CHAT_ID?: string | undefined; // legacy name; can be used as group chat id (e.g. -100...)
   EARLYRISE_GROUP_CHAT_ID?: string | undefined; // Telegram supergroup/chat id for kicking expired users (e.g. -100123...)
+  EARLYRISE_PUBLIC_CHAT_INVITE_URL?: string | undefined; // public invite link for the main chat
   TBANK_TERMINAL_KEY?: string | undefined;
   TBANK_PASSWORD?: string | undefined;
   TBANK_NOTIFICATION_URL?: string | undefined; // full URL for T-Bank webhook (overrides PUBLIC_BASE_URL+/payments/webhook)
@@ -80,6 +81,7 @@ function getEnv(): Env {
     ADMIN_DASHBOARD_TOKEN: process.env.ADMIN_DASHBOARD_TOKEN?.trim() || undefined,
     MAIN_CHAT_ID: process.env.MAIN_CHAT_ID?.trim() || undefined,
     EARLYRISE_GROUP_CHAT_ID: process.env.EARLYRISE_GROUP_CHAT_ID?.trim() || undefined,
+    EARLYRISE_PUBLIC_CHAT_INVITE_URL: process.env.EARLYRISE_PUBLIC_CHAT_INVITE_URL?.trim() || undefined,
     TBANK_TERMINAL_KEY: process.env.TBANK_TERMINAL_KEY?.trim() || undefined,
     TBANK_PASSWORD: process.env.TBANK_PASSWORD?.trim() || undefined,
     TBANK_NOTIFICATION_URL: process.env.TBANK_NOTIFICATION_URL?.trim() || undefined,

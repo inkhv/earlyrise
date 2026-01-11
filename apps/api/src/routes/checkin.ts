@@ -410,6 +410,27 @@ async function ensureRefundNoticeSent(params: { user: any; challenge: any; provi
   return true;
 }
 
+async function ensureChatInviteSent(params: { user: any; challenge: any }): Promise<boolean> {
+  const { user, challenge } = params;
+  const reason = `chat_invite_sent:${challenge.id}`;
+  const existing = await supabaseAdmin
+    .from("wallet_ledger")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("challenge_id", challenge.id)
+    .eq("reason", reason)
+    .limit(1);
+  if (existing.error) throw existing.error;
+  if ((existing.data || []).length > 0) return false;
+  const ins = await supabaseAdmin
+    .from("wallet_ledger")
+    .insert([{ user_id: user.id, challenge_id: challenge.id, delta: 0, currency: "EUR", reason }]);
+  if (ins.error) {
+    // best-effort
+  }
+  return true;
+}
+
 async function ensureTrialOfferSent(params: { user: any; challenge: any }): Promise<boolean> {
   const { user, challenge } = params;
   const createdAt = user?.created_at ? new Date(user.created_at) : null;
@@ -789,6 +810,20 @@ export function registerCheckinRoutes(app: FastifyInstance) {
               "Вопросы лучше обсуждать в общем чате с участниками."
           };
         }
+      }
+    }
+
+    if (!offer && status === "paid") {
+      const sent = await ensureChatInviteSent({ user: user.data, challenge });
+      if (sent) {
+        const link = env.EARLYRISE_PUBLIC_CHAT_INVITE_URL?.trim() || "https://t.me/+_9uHztv4J7MxMWNi";
+        offer = {
+          type: "chat_invite",
+          message:
+            "Отлично, оплата прошла ✅\n\n" +
+            "Вот ссылка на общий чат участников:\n" +
+            link
+        };
       }
     }
 
