@@ -266,7 +266,17 @@ function isFutureIso(iso: string | null): boolean {
 
 function isMissingColumnError(e: any, column: string): boolean {
   const msg = String(e?.message || e?.details || e || "");
-  return /column .* does not exist/i.test(msg) && msg.toLowerCase().includes(column.toLowerCase());
+  const m = msg.toLowerCase();
+  // Postgres: column "x" does not exist
+  if (/column .* does not exist/i.test(msg) && m.includes(column.toLowerCase())) return true;
+  // PostgREST schema cache: Could not find the 'x' column of 'table' in the schema cache
+  if (m.includes("schema cache") && m.includes(column.toLowerCase())) return true;
+  return false;
+}
+
+function isSchemaColumnIssue(e: any): boolean {
+  const msg = String(e?.message || e?.details || e || "");
+  return /column .* does not exist/i.test(msg) || /schema cache/i.test(msg) || /could not find the '.+' column/i.test(msg);
 }
 
 async function touchUserLastSeen(userId: string): Promise<void> {
@@ -736,8 +746,7 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     };
     let ins: any = await supabaseAdmin.from("payments").insert([extendedPaymentRow]).select("*").single();
     if (ins.error) {
-      const msg = String((ins.error as any).message || (ins.error as any).details || ins.error);
-      if (/column .* does not exist/i.test(msg)) {
+      if (isSchemaColumnIssue(ins.error)) {
         ins = await supabaseAdmin.from("payments").insert([basePaymentRow]).select("*").single();
       }
     }
