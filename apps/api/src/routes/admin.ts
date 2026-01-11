@@ -994,13 +994,21 @@ export function registerAdminRoutes(app: FastifyInstance) {
     const users = (usersRes.data || []).filter((u: any) => Number.isFinite(Number(u.telegram_user_id)));
     if (users.length === 0) return { ok: true, dry_run, attempted: 0, message: "no_users" };
 
-    // Paid payments for these users
-    const paidRes = await supabaseAdmin
+    // Paid payments for these users (plan_code may not exist on older schema; fallback)
+    let paidRes: any = await supabaseAdmin
       .from("payments")
       .select("user_id, created_at, plan_code, amount")
       .eq("challenge_id", challenge.id)
       .eq("status", "paid")
       .in("user_id", users.map((u: any) => String(u.id)) as any);
+    if (paidRes.error && isMissingColumnError(paidRes.error, "plan_code")) {
+      paidRes = await supabaseAdmin
+        .from("payments")
+        .select("user_id, created_at, amount")
+        .eq("challenge_id", challenge.id)
+        .eq("status", "paid")
+        .in("user_id", users.map((u: any) => String(u.id)) as any);
+    }
     if (paidRes.error) throw paidRes.error;
     const paidRows = (paidRes.data || []) as any[];
 

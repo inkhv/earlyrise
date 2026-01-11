@@ -326,14 +326,23 @@ async function getPaidAccessInfo(params: {
   challenge_id: string;
 }): Promise<{ is_active_paid: boolean; has_any_paid: boolean; is_forever: boolean; paid_until_utc: string | null }> {
   const { user_id, challenge_id } = params;
-  const res = await supabaseAdmin
+  let res: any = await supabaseAdmin
     .from("payments")
     .select("created_at, plan_code, amount")
     .eq("user_id", user_id)
     .eq("challenge_id", challenge_id)
     .eq("status", "paid");
+  if (res.error && isMissingColumnError(res.error, "plan_code")) {
+    // Backward compatibility for DB schemas without payments.plan_code
+    res = await supabaseAdmin
+      .from("payments")
+      .select("created_at, amount")
+      .eq("user_id", user_id)
+      .eq("challenge_id", challenge_id)
+      .eq("status", "paid");
+  }
   if (res.error) throw res.error;
-  const rows = res.data || [];
+  const rows = (res.data || []) as any[];
   const has_any_paid = rows.length > 0;
   if (!has_any_paid) return { is_active_paid: false, has_any_paid: false, is_forever: false, paid_until_utc: null };
 
