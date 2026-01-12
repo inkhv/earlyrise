@@ -6,6 +6,7 @@ import { createApiClient } from "./apiClient.js";
 import { registerGroupHandlers } from "./handlers/group.js";
 import { registerDmHandlers } from "./handlers/dm.js";
 import { registerMenuHandlers, showMainMenu } from "./handlers/menu.js";
+import { registerPenaltyHandlers } from "./handlers/penalty.js";
 import { markAwaitingTimezone } from "./state.js";
 
 function loadEnvLocal() {
@@ -38,13 +39,15 @@ loadEnvLocal();
 type Env = {
   TELEGRAM_BOT_TOKEN: string;
   API_BASE_URL: string;
+  CURATOR_TELEGRAM_USER_ID?: string;
 };
 
 function env(): Env {
   if (!process.env.TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
   return {
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
-    API_BASE_URL: process.env.API_BASE_URL || "http://localhost:3001"
+    API_BASE_URL: process.env.API_BASE_URL || "http://localhost:3001",
+    CURATOR_TELEGRAM_USER_ID: process.env.CURATOR_TELEGRAM_USER_ID
   };
 }
 
@@ -52,6 +55,7 @@ export async function startBot() {
   const E = env();
   const bot = new Bot(E.TELEGRAM_BOT_TOKEN);
   const api = createApiClient(E.API_BASE_URL);
+  const curatorTelegramUserId = E.CURATOR_TELEGRAM_USER_ID && /^\d+$/.test(E.CURATOR_TELEGRAM_USER_ID) ? Number(E.CURATOR_TELEGRAM_USER_ID) : null;
 
   async function registerStartGuard(ctx: any) {
     if (ctx.from) {
@@ -288,6 +292,7 @@ export async function startBot() {
 
   registerGroupHandlers({ bot, api });
   registerMenuHandlers({ bot, api });
+  registerPenaltyHandlers({ bot, api, curatorTelegramUserId });
   registerDmHandlers({ bot, api, botToken: E.TELEGRAM_BOT_TOKEN });
 
   bot.catch((err) => {

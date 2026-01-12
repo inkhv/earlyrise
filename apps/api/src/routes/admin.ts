@@ -93,7 +93,7 @@ function escapeHtml(s: string): string {
     .replaceAll("'", "&#39;");
 }
 
-async function telegramSendMessage(params: { chat_id: number | string; text: string }) {
+async function telegramSendMessage(params: { chat_id: number | string; text: string; reply_markup?: any }) {
   if (!env.TELEGRAM_BOT_TOKEN) {
     const err: any = new Error("Telegram bot token is not configured on API");
     err.statusCode = 501;
@@ -102,7 +102,8 @@ async function telegramSendMessage(params: { chat_id: number | string; text: str
   const payload = {
     chat_id: params.chat_id,
     text: params.text,
-    disable_web_page_preview: true
+    disable_web_page_preview: true,
+    reply_markup: params.reply_markup
   };
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
@@ -1184,6 +1185,297 @@ export function registerAdminRoutes(app: FastifyInstance) {
       expiry_prompts_sent: dry_run ? 0 : expiryPromptsSent,
       participations_marked_left: dry_run ? 0 : markedUnpaid,
       kicked: dry_run ? 0 : kicked,
+      errors
+    };
+  });
+
+  // POST /admin/penalties/run
+  // body (optional): { dry_run?: boolean, limit?: number, chat_id?: string|number }
+  // Purpose:
+  // - after wake+30 (user local) if no approved group '+' for today -> send DM with penalty choices
+  // - 4th miss -> kick user + buddy (left_at) and remove from chat
+  app.post("/admin/penalties/run", async (req, reply) => {
+    await requireDashboard(req);
+    const body = (req.body || {}) as any;
+    const dry_run = Boolean(body.dry_run);
+    const limit = Math.min(2000, Math.max(50, Number(body.limit || 1000)));
+
+    const chat_id_str = String(body.chat_id ?? env.EARLYRISE_GROUP_CHAT_ID ?? env.MAIN_CHAT_ID ?? "").trim();
+    const chat_id = chat_id_str && /^-?\d+$/.test(chat_id_str) ? chat_id_str : "";
+
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    const penaltyInfo = (level: number) => {
+      if (level <= 1) return { squats: 50, fine: 150, kick: false };
+      if (level === 2) return { squats: 100, fine: 300, kick: false };
+      if (level === 3) return { squats: 200, fine: 500, kick: false };
+      return { squats: 0, fine: 0, kick: true };
+    };
+
+    const missMarker = (localDate: string) => `penalty:miss:${localDate}`;
+    const noticeMarker = (localDate: string) => `penalty:notice_sent:${localDate}`;
+
+    const hasMarker = async (user_id: string, reason: string) => {
+      const r = await supabaseAdmin
+        .from("wallet_ledger")
+        .select("id")
+        .eq("challenge_id", challenge.id)
+        .eq("user_id", user_id)
+        .eq("reason", reason)
+        .limit(1);
+      if (r.error) throw r.error;
+      return (r.data || []).length > 0;
+    };
+    const putMarker = async (user_id: string, reason: string) => {
+      const ins = await supabaseAdmin.from("wallet_ledger").insert([{ user_id, challenge_id: challenge.id, delta: 0, currency: "RUB", reason }]);
+      if (ins.error) {
+        // ignore
+      }
+    };
+    const missCount = async (user_id: string) => {
+      const r = await supabaseAdmin
+        .from("wallet_ledger")
+        .select("id")
+        .eq("challenge_id", challenge.id)
+        .eq("user_id", user_id)
+        .ilike("reason", "penalty:miss:%")
+        .limit(5000);
+      if (r.error) throw r.error;
+      return (r.data || []).length;
+    };
+
+    // Active participations
+    const partsRes = await supabaseAdmin
+      .from("participations")
+      .select("id, user_id, wake_mode, wake_time_local")
+      .eq("challenge_id", challenge.id)
+      .is("left_at", null)
+      .limit(limit);
+    if (partsRes.error) throw partsRes.error;
+    const parts = (partsRes.data || []) as any[];
+    const userIds = Array.from(new Set(parts.map((p) => String(p.user_id)).filter(Boolean)));
+    if (userIds.length === 0) return { ok: true, dry_run, attempted: 0, message: "no_participants" };
+
+    const usersRes = await supabaseAdmin
+      .from("users")
+      .select("id, telegram_user_id, timezone")
+      .in("id", userIds as any);
+    if (usersRes.error) throw usersRes.error;
+    const usersById = new Map<string, any>((usersRes.data || []).map((u: any) => [String(u.id), u]));
+
+    // Buddy mapping (user_id -> buddy_user_id)
+    const partIdToUserId = new Map<string, string>(parts.map((p) => [String(p.id), String(p.user_id)]));
+    const buddyRes = await supabaseAdmin
+      .from("buddy_pairs")
+      .select("participation_a_id, participation_b_id, status")
+      .eq("challenge_id", challenge.id)
+      .eq("status", "active");
+    if (buddyRes.error) throw buddyRes.error;
+    const buddyOfUser = new Map<string, string>();
+    for (const bp of (buddyRes.data || []) as any[]) {
+      const aUser = partIdToUserId.get(String(bp.participation_a_id || ""));
+      const bUser = partIdToUserId.get(String(bp.participation_b_id || ""));
+      if (aUser && bUser) {
+        buddyOfUser.set(aUser, bUser);
+        buddyOfUser.set(bUser, aUser);
+      }
+    }
+
+    let evaluated = 0;
+    let noticesSent = 0;
+    let kicked = 0;
+    let finesPaidNotified = 0;
+    const errors: any[] = [];
+
+    for (const p of parts) {
+      const user_id = String(p.user_id || "");
+      const u = usersById.get(user_id);
+      const tgId = Number(u?.telegram_user_id);
+      if (!user_id || !Number.isFinite(tgId)) continue;
+
+      const tz = String(u?.timezone || "GMT+00:00");
+      const wakeMode = String(p.wake_mode || "fixed");
+      if (wakeMode === "flex") continue;
+      const wakeStr = String(p.wake_time_local || "").trim();
+      const parsedWake = wakeStr ? parseTimeHHMM(wakeStr) : null;
+      if (!parsedWake) continue;
+
+      const local = getLocalParts(now, tz);
+      const nowMin = minutesOfDay(local.hour, local.minute);
+      const wakeMin = minutesOfDay(parsedWake.hour, parsedWake.minute);
+      if (nowMin < wakeMin + 30) continue; // only after wake+30
+
+      const { startUtcIso, endUtcIso, localDate } = utcRangeForLocalDay({ now, timeZone: tz });
+      evaluated += 1;
+
+      const alreadyNoticed = await hasMarker(user_id, noticeMarker(localDate));
+      if (alreadyNoticed) continue;
+
+      // Has approved group plus today?
+      const plus = await supabaseAdmin
+        .from("checkins")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("challenge_id", challenge.id)
+        .eq("status", "approved")
+        .eq("source", "text")
+        .ilike("raw_text", "%group_plus%")
+        .gte("checkin_at_utc", startUtcIso)
+        .lte("checkin_at_utc", endUtcIso)
+        .limit(1);
+      if (plus.error) throw plus.error;
+      if ((plus.data || []).length > 0) {
+        // no penalty today
+        await putMarker(user_id, noticeMarker(localDate)); // avoid re-check spam
+        continue;
+      }
+
+      const alreadyMiss = await hasMarker(user_id, missMarker(localDate));
+      let level = await missCount(user_id);
+      if (!alreadyMiss) {
+        level += 1;
+        if (!dry_run) {
+          await putMarker(user_id, missMarker(localDate));
+        }
+      } else {
+        // marker exists; compute current as total count
+        level = Math.max(1, level);
+      }
+
+      const info = penaltyInfo(level);
+      if (!dry_run) {
+        await putMarker(user_id, noticeMarker(localDate));
+      }
+
+      // 4th miss => kick with buddy
+      if (info.kick) {
+        const buddy_user_id = buddyOfUser.get(user_id);
+        const toKick = [user_id].concat(buddy_user_id ? [buddy_user_id] : []);
+        if (!dry_run) {
+          // stop participation
+          await supabaseAdmin.from("participations").update({ left_at: nowIso }).eq("challenge_id", challenge.id).in("user_id", toKick as any).is("left_at", null);
+          if (chat_id) {
+            for (const uid of toKick) {
+              const tu = usersById.get(String(uid));
+              const tid = Number(tu?.telegram_user_id);
+              if (!Number.isFinite(tid)) continue;
+              try {
+                const untilDate = Math.floor(Date.now() / 1000) + 60;
+                await telegramBanChatMember({ chat_id, user_id: tid, until_date: untilDate });
+                await telegramUnbanChatMember({ chat_id, user_id: tid });
+              } catch (e: any) {
+                if (errors.length < 20) errors.push({ step: "kick", telegram_user_id: tid, message: e?.message || String(e), details: e?.details });
+              }
+            }
+          }
+        }
+        if (!dry_run) {
+          for (const uid of toKick) {
+            const tu = usersById.get(String(uid));
+            const tid = Number(tu?.telegram_user_id);
+            if (!Number.isFinite(tid)) continue;
+            try {
+              await telegramSendMessage({
+                chat_id: tid,
+                text: "Это 4-й пропуск. Вы вылетаете из челленджа вместе с напарником. ❌\n\nЕсли захочешь вернуться — напиши /menu и восстанови участие."
+              });
+            } catch (e: any) {
+              if (errors.length < 20) errors.push({ step: "dm_kick", telegram_user_id: tid, message: e?.message || String(e), details: e?.details });
+            }
+          }
+        }
+        kicked += dry_run ? 0 : 1;
+        continue;
+      }
+
+      const kb = {
+        inline_keyboard: [
+          [{ text: "✅ Выполнить штрафное задание", callback_data: `pen:task:${localDate}` }],
+          [{ text: "💳 Оплатить штраф", callback_data: `pen:pay:${localDate}` }]
+        ]
+      };
+
+      const text =
+        `Сегодня пропуск №${level}.\n\n` +
+        `Выбери вариант до 23:59 по твоей таймзоне:\n` +
+        `- ${info.squats} приседаний (видео)\n` +
+        `- или штраф ${info.fine} ₽`;
+
+      if (!dry_run) {
+        try {
+          await telegramSendMessage({ chat_id: tgId, text, reply_markup: kb });
+          noticesSent += 1;
+        } catch (e: any) {
+          if (errors.length < 20) errors.push({ step: "dm_notice", telegram_user_id: tgId, message: e?.message || String(e), details: e?.details });
+        }
+      }
+    }
+
+    // Follow-up: if a fine was paid (payments.status=paid) -> notify user once
+    // We rely on markers created by /bot/penalty/pay/create: "penalty:pay_intent:<localDate>|<provider_payment_id>|<amount>"
+    const sinceIso = new Date(Date.now() - 3 * 86400000).toISOString();
+    const intents = await supabaseAdmin
+      .from("wallet_ledger")
+      .select("user_id, reason, created_at")
+      .eq("challenge_id", challenge.id)
+      .ilike("reason", "penalty:pay_intent:%")
+      .gte("created_at", sinceIso)
+      .limit(2000);
+    if (intents.error) throw intents.error;
+    for (const row of (intents.data || []) as any[]) {
+      const reason = String(row.reason || "");
+      const m = reason.match(/^penalty:pay_intent:(\d{4}-\d{2}-\d{2})\|([^|]+)\|(\d+)/);
+      if (!m) continue;
+      const localDate = m[1];
+      const provider_payment_id = m[2];
+      const amountRub = Number(m[3]);
+      const uid = String(row.user_id || "");
+      if (!uid) continue;
+
+      const already = await hasMarker(uid, `penalty:pay_notified:${localDate}|${provider_payment_id}`);
+      if (already) continue;
+
+      const pay = await supabaseAdmin
+        .from("payments")
+        .select("status")
+        .eq("challenge_id", challenge.id)
+        .eq("user_id", uid)
+        .eq("provider_payment_id", provider_payment_id)
+        .maybeSingle();
+      if (pay.error) throw pay.error;
+      if (String((pay.data as any)?.status || "") !== "paid") continue;
+
+      const u = usersById.get(uid);
+      const tgId = Number(u?.telegram_user_id);
+      if (!Number.isFinite(tgId)) continue;
+
+      if (!dry_run) {
+        await putMarker(uid, `penalty:pay_notified:${localDate}|${provider_payment_id}`);
+        try {
+          await telegramSendMessage({ chat_id: tgId, text: `Штраф оплачен ✅\n\nСумма: ${amountRub} ₽` });
+          finesPaidNotified += 1;
+        } catch (e: any) {
+          if (errors.length < 20) errors.push({ step: "dm_fine_paid", telegram_user_id: tgId, message: e?.message || String(e), details: e?.details });
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      dry_run,
+      challenge_id: challenge.id,
+      chat_id: chat_id || null,
+      evaluated,
+      notices_sent: dry_run ? 0 : noticesSent,
+      kicked: dry_run ? 0 : kicked,
+      fines_paid_notified: dry_run ? 0 : finesPaidNotified,
       errors
     };
   });

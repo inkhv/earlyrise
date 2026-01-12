@@ -450,6 +450,66 @@ async function ensureChatInviteSent(params: { user: any; challenge: any }): Prom
   return true;
 }
 
+// --- Penalties (MVP): state is stored as wallet_ledger markers (reason text) ---
+const PENALTY_WINDOW_AFTER_WAKE_MIN = 30; // wake + 30 min (user local timezone)
+const PENALTY_LEVELS: Record<number, { squats: number; fine_rub: number } | { kick: true }> = {
+  1: { squats: 50, fine_rub: 150 },
+  2: { squats: 100, fine_rub: 300 },
+  3: { squats: 200, fine_rub: 500 },
+  4: { kick: true }
+};
+
+function penaltyInfo(level: number): { level: number; squats: number; fine_rub: number; kick: boolean } {
+  const row: any = (PENALTY_LEVELS as any)[level] || null;
+  if (!row) return { level, squats: 200, fine_rub: 500, kick: level >= 4 };
+  if (row.kick) return { level, squats: 0, fine_rub: 0, kick: true };
+  return { level, squats: Number(row.squats), fine_rub: Number(row.fine_rub), kick: false };
+}
+
+function penaltyReason(kind: string, localDate: string): string {
+  return `penalty:${kind}:${localDate}`;
+}
+
+async function ledgerHasReason(params: { user_id: string; challenge_id: string; reason: string }): Promise<boolean> {
+  const r = await supabaseAdmin
+    .from("wallet_ledger")
+    .select("id")
+    .eq("user_id", params.user_id)
+    .eq("challenge_id", params.challenge_id)
+    .eq("reason", params.reason)
+    .limit(1);
+  if (r.error) throw r.error;
+  return (r.data || []).length > 0;
+}
+
+async function ledgerInsertMarker(params: { user_id: string; challenge_id: string; reason: string }): Promise<void> {
+  const ins = await supabaseAdmin
+    .from("wallet_ledger")
+    .insert([{ user_id: params.user_id, challenge_id: params.challenge_id, delta: 0, currency: "RUB", reason: params.reason }]);
+  if (ins.error) {
+    // best-effort
+  }
+}
+
+async function penaltyMissCount(params: { user_id: string; challenge_id: string }): Promise<number> {
+  const r = await supabaseAdmin
+    .from("wallet_ledger")
+    .select("id")
+    .eq("user_id", params.user_id)
+    .eq("challenge_id", params.challenge_id)
+    .ilike("reason", "penalty:miss:%")
+    .limit(5000);
+  if (r.error) throw r.error;
+  return (r.data || []).length;
+}
+
+async function todayPenaltyLevel(params: { user_id: string; challenge_id: string; localDate: string }): Promise<number | null> {
+  const hasToday = await ledgerHasReason({ user_id: params.user_id, challenge_id: params.challenge_id, reason: penaltyReason("miss", params.localDate) });
+  if (!hasToday) return null;
+  const n = await penaltyMissCount({ user_id: params.user_id, challenge_id: params.challenge_id });
+  return Math.max(1, Math.min(4, n));
+}
+
 async function ensureTrialOfferSent(params: { user: any; challenge: any }): Promise<boolean> {
   const { user, challenge } = params;
   const createdAt = user?.created_at ? new Date(user.created_at) : null;
@@ -871,6 +931,288 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     }
     await touchUserLastSeen(user.data.id);
     return payload;
+  });
+
+  // POST /bot/penalty/choose
+  // body: { telegram_user_id: number, local_date: "YYYY-MM-DD", choice: "task"|"pay" }
+  app.post("/bot/penalty/choose", async (req, reply) => {
+    const body = (req.body || {}) as any;
+    const telegram_user_id = Number(body.telegram_user_id);
+    let local_date = String(body.local_date || "").trim();
+    const choice = String(body.choice || "").trim();
+    if (!telegram_user_id) {
+      reply.code(400);
+      return { ok: false, error: "missing_telegram_user_id" };
+    }
+    if (choice !== "task" && choice !== "pay") {
+      reply.code(400);
+      return { ok: false, error: "invalid_choice" };
+    }
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+    const userRes = await supabaseAdmin.from("users").select("*").eq("telegram_user_id", telegram_user_id).maybeSingle();
+    if (!userRes.data) {
+      reply.code(404);
+      return { ok: false, error: "user_not_found" };
+    }
+    if (!local_date) {
+      const tz = userRes.data.timezone || "GMT+00:00";
+      local_date = utcRangeForLocalDay({ now: new Date(), timeZone: tz }).localDate;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(local_date)) {
+      reply.code(400);
+      return { ok: false, error: "invalid_local_date" };
+    }
+
+    const level = await todayPenaltyLevel({ user_id: userRes.data.id, challenge_id: challenge.id, localDate: local_date });
+    if (!level) {
+      reply.code(409);
+      return { ok: false, error: "no_penalty_today", message: "Сегодня штраф не назначен." };
+    }
+    const info = penaltyInfo(level);
+    if (info.kick) {
+      reply.code(409);
+      return { ok: false, error: "kicked", message: "Это 4-й пропуск: участие остановлено." };
+    }
+
+    await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason(`choice_${choice}`, local_date) });
+
+    if (choice === "task") {
+      return {
+        ok: true,
+        choice,
+        level,
+        squats: info.squats,
+        fine_rub: info.fine_rub,
+        message: `Ок.\n\nПришли видео с приседаниями ${info.squats} раз до 23:59 по твоей таймзоне сегодня.\n\nЯ отправлю куратору на проверку.`
+      };
+    }
+
+    return {
+      ok: true,
+      choice,
+      level,
+      squats: info.squats,
+      fine_rub: info.fine_rub,
+      message: `Ок.\n\nОплати штраф ${info.fine_rub} ₽ до 23:59 сегодня. Сейчас пришлю ссылку на оплату.`
+    };
+  });
+
+  // POST /bot/penalty/pay/create (create T-Bank payment link for fine)
+  // body: { telegram_user_id: number, local_date: "YYYY-MM-DD" }
+  app.post("/bot/penalty/pay/create", async (req, reply) => {
+    const body = (req.body || {}) as any;
+    const telegram_user_id = Number(body.telegram_user_id);
+    let local_date = String(body.local_date || "").trim();
+    if (!telegram_user_id) {
+      reply.code(400);
+      return { ok: false, error: "missing_telegram_user_id" };
+    }
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+    const userRes = await supabaseAdmin.from("users").select("*").eq("telegram_user_id", telegram_user_id).maybeSingle();
+    if (!userRes.data) {
+      reply.code(404);
+      return { ok: false, error: "user_not_found", message: "Сначала /start" };
+    }
+    if (!local_date) {
+      const tz = userRes.data.timezone || "GMT+00:00";
+      local_date = utcRangeForLocalDay({ now: new Date(), timeZone: tz }).localDate;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(local_date)) {
+      reply.code(400);
+      return { ok: false, error: "invalid_local_date" };
+    }
+    const level = await todayPenaltyLevel({ user_id: userRes.data.id, challenge_id: challenge.id, localDate: local_date });
+    if (!level) {
+      reply.code(409);
+      return { ok: false, error: "no_penalty_today", message: "Сегодня штраф не назначен." };
+    }
+    const info = penaltyInfo(level);
+    if (info.kick) {
+      reply.code(409);
+      return { ok: false, error: "kicked", message: "Это 4-й пропуск: участие остановлено." };
+    }
+
+    if (!env.TBANK_TERMINAL_KEY || !env.TBANK_PASSWORD) {
+      reply.code(501);
+      return { ok: false, error: "tbank_not_configured", message: "Оплата пока не настроена (нет ключей Т‑Банка)." };
+    }
+    const notificationUrl =
+      env.TBANK_NOTIFICATION_URL?.trim() ||
+      (env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/payments/webhook` : "");
+    if (!notificationUrl) {
+      reply.code(501);
+      return { ok: false, error: "notification_url_missing", message: "Нет TBANK_NOTIFICATION_URL или PUBLIC_BASE_URL для вебхука." };
+    }
+
+    const amountRub = info.fine_rub;
+    const amountKopeks = Math.round(amountRub * 100);
+    const orderId = `er_penalty_${challenge.id.slice(0, 8)}_${telegram_user_id}_${local_date}_l${level}_${Date.now()}`;
+    const initPayload: any = {
+      TerminalKey: env.TBANK_TERMINAL_KEY,
+      Amount: amountKopeks,
+      OrderId: orderId,
+      Description: `EarlyRise: штраф (уровень ${level})`,
+      NotificationURL: notificationUrl,
+      DATA: {
+        kind: "penalty",
+        telegram_user_id: String(telegram_user_id),
+        user_id: userRes.data.id,
+        challenge_id: challenge.id,
+        local_date,
+        level: String(level)
+      }
+    };
+    initPayload.Token = tbankToken(initPayload, env.TBANK_PASSWORD);
+
+    const r = await fetch("https://securepay.tinkoff.ru/v2/Init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(initPayload)
+    });
+    const text = await r.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = { raw: text };
+    }
+    if (!r.ok || !json?.Success) {
+      reply.code(502);
+      const msgParts = [json?.Message, json?.Details, json?.ErrorCode].filter((x) => typeof x === "string" && x.trim());
+      const message = msgParts.length ? msgParts.join(" · ") : "Ошибка инициализации платежа";
+      return { ok: false, error: "tbank_init_failed", message, raw: json };
+    }
+    const paymentId = String(json.PaymentId || "");
+    const paymentUrl = String(json.PaymentURL || "");
+    if (!paymentId || !paymentUrl) {
+      reply.code(502);
+      return { ok: false, error: "tbank_bad_response", message: "Неожиданный ответ от Т‑Банка", raw: json };
+    }
+
+    // Insert payment row (best-effort; tolerate missing columns)
+    const baseRow: any = {
+      user_id: userRes.data.id,
+      challenge_id: challenge.id,
+      provider: "manual",
+      amount: amountRub,
+      currency: "RUB",
+      status: "pending",
+      provider_payment_id: `tbank:${paymentId}`
+    };
+    const extendedRow: any = { ...baseRow, order_id: orderId, plan_code: `penalty_l${level}`, access_days: null };
+    let ins: any = await supabaseAdmin.from("payments").insert([extendedRow]).select("*").single();
+    if (ins.error) {
+      if (isSchemaColumnIssue(ins.error)) {
+        ins = await supabaseAdmin.from("payments").insert([baseRow]).select("*").single();
+      }
+    }
+    if (ins.error) throw ins.error;
+
+    await ledgerInsertMarker({
+      user_id: userRes.data.id,
+      challenge_id: challenge.id,
+      reason: `penalty:pay_intent:${local_date}|${ins.data.provider_payment_id}|${amountRub}`
+    });
+
+    return { ok: true, payment_url: paymentUrl, amount_rub: amountRub, provider_payment_id: ins.data.provider_payment_id, level };
+  });
+
+  // POST /bot/penalty/task/submit (mark that user sent video; bot forwards it to curator separately)
+  // body: { telegram_user_id: number, local_date: "YYYY-MM-DD", message_id: number, file_id?: string }
+  app.post("/bot/penalty/task/submit", async (req, reply) => {
+    const body = (req.body || {}) as any;
+    const telegram_user_id = Number(body.telegram_user_id);
+    let local_date = String(body.local_date || "").trim();
+    if (!telegram_user_id) {
+      reply.code(400);
+      return { ok: false, error: "missing_telegram_user_id" };
+    }
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+    const userRes = await supabaseAdmin.from("users").select("*").eq("telegram_user_id", telegram_user_id).maybeSingle();
+    if (!userRes.data) {
+      reply.code(404);
+      return { ok: false, error: "user_not_found" };
+    }
+    if (!local_date) {
+      const tz = userRes.data.timezone || "GMT+00:00";
+      local_date = utcRangeForLocalDay({ now: new Date(), timeZone: tz }).localDate;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(local_date)) {
+      reply.code(400);
+      return { ok: false, error: "invalid_local_date" };
+    }
+    const level = await todayPenaltyLevel({ user_id: userRes.data.id, challenge_id: challenge.id, localDate: local_date });
+    if (!level) {
+      reply.code(409);
+      return { ok: false, error: "no_penalty_today" };
+    }
+    const info = penaltyInfo(level);
+    if (info.kick) {
+      reply.code(409);
+      return { ok: false, error: "kicked" };
+    }
+
+    const chosen = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_task", local_date) });
+    if (!chosen) {
+      reply.code(409);
+      return { ok: false, error: "task_not_chosen", message: "Сначала выбери «Выполнить штрафное задание»." };
+    }
+
+    await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_submitted:${local_date}` });
+    const curatorId = env.CURATOR_TELEGRAM_USER_ID ? Number(env.CURATOR_TELEGRAM_USER_ID) : NaN;
+    return {
+      ok: true,
+      local_date,
+      level,
+      squats: info.squats,
+      curator_telegram_user_id: Number.isFinite(curatorId) ? curatorId : null
+    };
+  });
+
+  // POST /bot/penalty/task/approve (curator confirms)
+  // body: { telegram_user_id: number, local_date: "YYYY-MM-DD", curator_telegram_user_id: number }
+  app.post("/bot/penalty/task/approve", async (req, reply) => {
+    const body = (req.body || {}) as any;
+    const telegram_user_id = Number(body.telegram_user_id);
+    const local_date = String(body.local_date || "").trim();
+    const curator_telegram_user_id = Number(body.curator_telegram_user_id);
+    if (!telegram_user_id || !curator_telegram_user_id) {
+      reply.code(400);
+      return { ok: false, error: "missing_ids" };
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(local_date)) {
+      reply.code(400);
+      return { ok: false, error: "invalid_local_date" };
+    }
+    const configured = env.CURATOR_TELEGRAM_USER_ID ? Number(env.CURATOR_TELEGRAM_USER_ID) : NaN;
+    if (!Number.isFinite(configured) || configured !== curator_telegram_user_id) {
+      reply.code(403);
+      return { ok: false, error: "forbidden" };
+    }
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+    const userRes = await supabaseAdmin.from("users").select("*").eq("telegram_user_id", telegram_user_id).maybeSingle();
+    if (!userRes.data) {
+      reply.code(404);
+      return { ok: false, error: "user_not_found" };
+    }
+    await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_approved:${local_date}` });
+    return { ok: true };
   });
 
   // POST /bot/trial/claim (enable 7-day free trial for active challenge)
