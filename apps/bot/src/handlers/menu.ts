@@ -193,12 +193,11 @@ export async function showMainMenu(params: {
   const { me } = await fetchMe(api, ctx.from.id);
   const status = accessStatusFromMe(me);
   const hasTrialOffer = Boolean(me?.offer?.type === "trial_7d" || (me?.offer as any)?.message);
-  const tz = me?.user?.timezone ? String(me.user.timezone) : "—";
 
   const text =
     status === "expired"
       ? "Доступ закончился ⛔️\n\nЧтобы восстановить участие, нажми «Восстановить участие» и выбери тариф."
-      : `Твоя таймзона: ${tz}\n\nВыбери действие:`;
+      : "Выбери действие:";
   await ctx.reply(text, { reply_markup: mainMenuKeyboard({ status, hasTrialOffer }) });
 
   if (typeof me?.offer?.message === "string" && me.offer.message.trim()) {
