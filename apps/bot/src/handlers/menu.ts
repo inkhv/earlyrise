@@ -47,6 +47,11 @@ function accessStatusFromMe(me: MeResponse | null): AccessStatus {
   return isAccessStatus(s) ? s : "lead";
 }
 
+function statusLabelRu(status: AccessStatus): string {
+  // Spec: active only when actually paid; otherwise "ожидается оплата" (incl trial).
+  return status === "paid" ? "активный" : "ожидается оплата";
+}
+
 function mainMenuKeyboard(params: { status: AccessStatus; hasTrialOffer: boolean }) {
   const k = new InlineKeyboard();
   if (params.status === "expired") {
@@ -54,7 +59,7 @@ function mainMenuKeyboard(params: { status: AccessStatus; hasTrialOffer: boolean
     return k;
   }
   if (params.status === "paid" || params.status === "trial") {
-    k.text("📊 Статистика", CB.stats).row();
+    k.text(`📊 Статистика — ${statusLabelRu(params.status)}`, CB.stats).row();
     k.text("🌍 Часовой пояс", CB.tz).text("⏰ Время подъёма", CB.wake).row();
     if (params.status === "trial") k.text("💳 Оплатить участие", CB.pay).row();
     k.text("ℹ️ О проекте", CB.about);
@@ -99,6 +104,78 @@ function aboutText() {
   );
 }
 
+function parseGmtOffsetToMinutes(input: string): number | null {
+  const s = String(input || "").trim();
+  const m = s.match(/^(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$/i);
+  if (!m) return null;
+  const sign = m[1] === "-" ? -1 : 1;
+  const hh = Number(m[2]);
+  const mm = m[3] ? Number(m[3]) : 0;
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  if (hh < 0 || hh > 14) return null;
+  if (mm < 0 || mm > 59) return null;
+  return sign * (hh * 60 + mm);
+}
+
+function fmtRuDateTime(params: { iso: string | null | undefined; timezone: string | null | undefined }): string {
+  const iso = params.iso ? String(params.iso) : "";
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "—";
+
+  const months = [
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря"
+  ];
+
+  const tz = params.timezone ? String(params.timezone) : "";
+  const offsetMin = tz ? parseGmtOffsetToMinutes(tz) : null;
+  if (offsetMin !== null) {
+    const local = new Date(d.getTime() + offsetMin * 60000);
+    const day = local.getUTCDate();
+    const month = months[local.getUTCMonth()] || "";
+    const year = local.getUTCFullYear();
+    const hh = String(local.getUTCHours()).padStart(2, "0");
+    const mm = String(local.getUTCMinutes()).padStart(2, "0");
+    return `${day} ${month} ${year} года в ${hh}:${mm}`;
+  }
+
+  // IANA timezone fallback (e.g. Europe/Amsterdam)
+  try {
+    const fmt = new Intl.DateTimeFormat("ru-RU", {
+      timeZone: tz || "UTC",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    });
+    const parts = fmt.formatToParts(d);
+    const get = (type: string) => parts.find((p) => p.type === type)?.value || "";
+    const day = Number(get("day"));
+    const monthNum = Number(get("month"));
+    const year = Number(get("year"));
+    const hour = get("hour").padStart(2, "0");
+    const minute = get("minute").padStart(2, "0");
+    const month = months[Math.max(0, Math.min(11, monthNum - 1))] || "";
+    if (!day || !year || !monthNum) return iso;
+    return `${day} ${month} ${year} года в ${hour}:${minute}`;
+  } catch {
+    return iso;
+  }
+}
+
 async function fetchMe(api: <T = any>(path: string, init?: RequestInit) => Promise<ApiResponse<T>>, telegramUserId: number) {
   const r = await api<MeResponse>(`/bot/me/${telegramUserId}`, { method: "GET" });
   return { r, me: (r.json || null) as MeResponse | null };
@@ -118,23 +195,10 @@ export async function showMainMenu(params: {
   const hasTrialOffer = Boolean(me?.offer?.type === "trial_7d" || (me?.offer as any)?.message);
   const tz = me?.user?.timezone ? String(me.user.timezone) : "—";
 
-  const header =
-    status === "paid"
-      ? "Ты участник ✅"
-      : status === "trial"
-        ? "У тебя активна пробная неделя ✅"
-        : status === "expired"
-          ? "Доступ закончился ⛔️"
-        : "Добро пожаловать! Похоже, ты ещё не участвуешь.";
-
-  const hint =
-    status === "paid" || status === "trial"
-      ? `Твоя таймзона: ${tz}\n\nВыбери действие:`
-      : status === "expired"
-        ? "Чтобы восстановить участие, нажми «Восстановить участие» и выбери тариф."
-      : "Выбери действие: узнать подробнее или оплатить участие.";
-
-  const text = `${header}\n\n${hint}`;
+  const text =
+    status === "expired"
+      ? "Доступ закончился ⛔️\n\nЧтобы восстановить участие, нажми «Восстановить участие» и выбери тариф."
+      : `Твоя таймзона: ${tz}\n\nВыбери действие:`;
   await ctx.reply(text, { reply_markup: mainMenuKeyboard({ status, hasTrialOffer }) });
 
   if (typeof me?.offer?.message === "string" && me.offer.message.trim()) {
@@ -171,10 +235,19 @@ export function registerMenuHandlers(params: {
       const { r, me } = await fetchMe(api, ctx.from.id);
       if (!r.ok || !me?.user) return ctx.reply(`Не смог загрузить профиль (HTTP ${r.status}).`);
       const s = me?.stats;
+      const status = accessStatusFromMe(me);
+      const tz = me?.user?.timezone ? String(me.user.timezone) : "—";
+      const last = fmtRuDateTime({ iso: s?.last_checkin_at_utc ?? null, timezone: tz });
+
       await ctx.reply(
-        `Профиль:\n- timezone: ${me.user.timezone}\n- streak: ${s?.streak_days ?? 0}\n- total: ${s?.total_checkins ?? 0}\n- last: ${s?.last_checkin_at_utc ?? "—"}`
+        "Профиль:\n" +
+          `— статус: ${statusLabelRu(status)}\n` +
+          `— часовой пояс: ${tz}\n` +
+          `— подъёмов подряд: ${s?.streak_days ?? 0}\n` +
+          `— количество подъёмов: ${s?.total_checkins ?? 0}\n` +
+          `— последнее: ${last}`
       );
-      return showMainMenu({ ctx, api });
+      return;
     }
 
     if (data === CB.tz) {
