@@ -44,11 +44,14 @@ type Env = {
 
 function env(): Env {
   if (!process.env.TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
-  return {
+  const out: Env = {
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
-    API_BASE_URL: process.env.API_BASE_URL || "http://localhost:3001",
-    CURATOR_TELEGRAM_USER_ID: process.env.CURATOR_TELEGRAM_USER_ID
+    API_BASE_URL: process.env.API_BASE_URL || "http://localhost:3001"
   };
+  // exactOptionalPropertyTypes: do not set optional field to undefined; omit it.
+  const curator = process.env.CURATOR_TELEGRAM_USER_ID;
+  if (curator) out.CURATOR_TELEGRAM_USER_ID = curator;
+  return out;
 }
 
 export async function startBot() {

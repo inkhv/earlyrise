@@ -5,14 +5,21 @@ function parsePenaltyCb(data: string): { action: "task" | "pay"; local_date: str
   // data: "pen:<task|pay>:YYYY-MM-DD"
   const m = data.match(/^pen:(task|pay):(\d{4}-\d{2}-\d{2})$/);
   if (!m) return null;
-  return { action: m[1] as any, local_date: m[2] };
+  const action = m[1] as any;
+  const local_date = m[2];
+  if (!local_date) return null;
+  return { action, local_date };
 }
 
 function parsePenaltyAdminCb(data: string): { action: "ok" | "reject"; telegram_user_id: number; local_date: string } | null {
   // data: "penadm:<ok|reject>:<telegram_user_id>:YYYY-MM-DD"
   const m = data.match(/^penadm:(ok|reject):(\d+):(\d{4}-\d{2}-\d{2})$/);
   if (!m) return null;
-  return { action: m[1] as any, telegram_user_id: Number(m[2]), local_date: m[3] };
+  const action = m[1] as any;
+  const telegram_user_id = Number(m[2]);
+  const local_date = m[3];
+  if (!Number.isFinite(telegram_user_id) || !local_date) return null;
+  return { action, telegram_user_id, local_date };
 }
 
 export function registerPenaltyHandlers(params: {
