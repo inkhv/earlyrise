@@ -166,6 +166,7 @@ export function registerDmHandlers(params: {
 
     // DM flow: allow text plan check-in as alternative to voice (MVP).
     try {
+      await ctx.reply("Спасибо, анализирую. Скоро вернусь с ответом…");
       const r = await api("/bot/checkin/dm_text", {
         method: "POST",
         body: JSON.stringify({
@@ -224,6 +225,9 @@ export function registerDmHandlers(params: {
       }
     }
     try {
+      if (!isGroup) {
+        await ctx.reply("Спасибо, анализирую. Скоро вернусь с ответом…");
+      }
       const audio = await telegramDownloadVoiceAsBase64({ botToken, fileId: v.file_id });
       const r = await api("/bot/checkin/voice", {
         method: "POST",
