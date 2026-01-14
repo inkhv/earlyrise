@@ -1573,6 +1573,44 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     const user = await ensureUser(telegram_user_id, { username: body.username ?? null, first_name: body.first_name ?? null });
     await ensureParticipation(user.id, challenge.id);
 
+    // Penalty mode: after wake+30 (local time) do not accept voice check-ins for fixed wake users.
+    // Flex users are exempt.
+    try {
+      const partRes = await supabaseAdmin
+        .from("participations")
+        .select("wake_mode, wake_time_local, left_at")
+        .eq("user_id", user.id)
+        .eq("challenge_id", challenge.id)
+        .maybeSingle();
+      if (!partRes.error && partRes.data && !partRes.data.left_at) {
+        const wakeMode = String((partRes.data as any).wake_mode || "fixed");
+        if (wakeMode !== "flex") {
+          const wakeStr = String((partRes.data as any).wake_time_local || "").trim();
+          const parsedWake = wakeStr ? parseTimeHHMM(wakeStr) : null;
+          if (parsedWake) {
+            const tz = user.timezone || "GMT+00:00";
+            const localNow = getLocalParts(new Date(), tz);
+            const nowMinutes = minutesOfDay(localNow.hour, localNow.minute);
+            const wakeMinutes = minutesOfDay(parsedWake.hour, parsedWake.minute);
+            const cutoff = wakeMinutes + 30;
+            if (nowMinutes > cutoff) {
+              reply.code(200);
+              return {
+                ok: false,
+                error: "penalty_mode",
+                message:
+                  "Сейчас уже штрафной режим: прошло больше 30 минут после времени подъёма.\n\n" +
+                  "Голосовые после wake+30 не принимаю.\n\n" +
+                  "Если нужно — открой /menu."
+              };
+            }
+          }
+        }
+      }
+    } catch {
+      // best-effort: if this check fails, keep old behavior
+    }
+
     // Allow only 1 voice check-in per local day (based on user's timezone)
     const tz = user.timezone || "GMT+00:00";
     const { startUtcIso, endUtcIso } = utcRangeForLocalDay({ now: new Date(), timeZone: tz });
