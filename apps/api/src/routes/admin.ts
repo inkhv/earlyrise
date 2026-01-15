@@ -625,6 +625,114 @@ export function registerAdminRoutes(app: FastifyInstance) {
     return { ok: true, result: tg?.result || null };
   });
 
+  // POST /admin/grant/forever
+  // body: { telegram_user_id: number, username?: string, first_name?: string }
+  // Purpose: grant "forever" paid access by inserting a paid payment with plan_code=life and notifying the user in DM.
+  app.post("/admin/grant/forever", async (req, reply) => {
+    await requireDashboard(req);
+    const body = (req.body || {}) as any;
+    const telegram_user_id = Number(body.telegram_user_id);
+    const usernameRaw = body.username !== undefined ? String(body.username || "").trim() : "";
+    const first_name = body.first_name !== undefined ? String(body.first_name || "").trim() : "";
+    const username = usernameRaw.startsWith("@") ? usernameRaw.slice(1) : usernameRaw;
+    if (!Number.isFinite(telegram_user_id) || telegram_user_id <= 0) {
+      reply.code(400);
+      return { ok: false, error: "invalid_telegram_user_id" };
+    }
+
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+
+    // Upsert user (best-effort)
+    const upsertPayload: any = { telegram_user_id };
+    if (username) upsertPayload.username = username;
+    if (first_name) upsertPayload.first_name = first_name;
+    const up = await supabaseAdmin.from("users").upsert([upsertPayload], { onConflict: "telegram_user_id" }).select("*").single();
+    if (up.error) throw up.error;
+    const user = up.data as any;
+
+    // Idempotency: if any paid 'life' already exists, do nothing.
+    const existing = await supabaseAdmin
+      .from("payments")
+      .select("id, created_at")
+      .eq("challenge_id", challenge.id)
+      .eq("user_id", user.id)
+      .eq("status", "paid")
+      .or("plan_code.eq.life,amount.eq.3000")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (existing.error && isMissingColumnError(existing.error, "plan_code")) {
+      // Fallback: only amount check
+      const ex2 = await supabaseAdmin
+        .from("payments")
+        .select("id, created_at, amount")
+        .eq("challenge_id", challenge.id)
+        .eq("user_id", user.id)
+        .eq("status", "paid")
+        .eq("amount", 3000)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (ex2.error) throw ex2.error;
+      if ((ex2.data || []).length > 0) {
+        return { ok: true, already: true, user_id: user.id, telegram_user_id, challenge_id: challenge.id };
+      }
+    } else if (!existing.error && (existing.data || []).length > 0) {
+      return { ok: true, already: true, user_id: user.id, telegram_user_id, challenge_id: challenge.id };
+    }
+
+    const nowIso = new Date().toISOString();
+    const provider_payment_id = `manual:grant_life:${telegram_user_id}:${Date.now()}`;
+    const baseRow: any = {
+      user_id: user.id,
+      challenge_id: challenge.id,
+      provider: "manual",
+      amount: 3000,
+      currency: "RUB",
+      status: "paid",
+      provider_payment_id
+    };
+    const extendedRow: any = { ...baseRow, plan_code: "life", order_id: `grant_life_${telegram_user_id}_${Date.now()}` };
+    let ins: any = await supabaseAdmin.from("payments").insert([extendedRow]).select("*").single();
+    if (ins.error && isSchemaColumnIssue(ins.error)) {
+      ins = await supabaseAdmin.from("payments").insert([baseRow]).select("*").single();
+    }
+    if (ins.error) throw ins.error;
+
+    // Best-effort: update paid_until to null (forever), ignore older schemas.
+    try {
+      const upd = await supabaseAdmin.from("users").update({ paid_until: null }).eq("id", user.id);
+      if (upd.error && !isMissingColumnError(upd.error, "paid_until")) throw upd.error;
+    } catch {
+      // ignore
+    }
+
+    // Notify user in DM
+    try {
+      await telegramSendMessage({
+        chat_id: telegram_user_id,
+        text:
+          "Поздравляю! 🎉\n\n" +
+          "Тебе подключён вечный доступ к EarlyRise.\n\n" +
+          "Открой /menu — статус уже «оплачено»."
+      });
+    } catch (e: any) {
+      return {
+        ok: true,
+        user_id: user.id,
+        telegram_user_id,
+        challenge_id: challenge.id,
+        payment_id: ins.data?.id ?? null,
+        message_sent: false,
+        message_error: e?.message || String(e)
+      };
+    }
+
+    return { ok: true, user_id: user.id, telegram_user_id, challenge_id: challenge.id, payment_id: ins.data?.id ?? null, message_sent: true, at: nowIso };
+  });
+
   // POST /admin/broadcast/send
   // body:
   // - { target: "group", chat_id: string|number, text: string }
