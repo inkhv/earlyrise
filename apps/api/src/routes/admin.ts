@@ -200,6 +200,11 @@ function isMissingColumnError(e: any, column: string): boolean {
   return /column .* does not exist/i.test(msg) && msg.toLowerCase().includes(column.toLowerCase());
 }
 
+function isSchemaColumnIssue(e: any): boolean {
+  const msg = String(e?.message || e?.details || e || "");
+  return /schema cache/i.test(msg) || /Could not find the '.*' column/i.test(msg) || /column .* does not exist/i.test(msg);
+}
+
 // --- Buddy admin (MVP) ---
 async function getActiveParticipationId(user_id: string, challenge_id: string): Promise<string | null> {
   const res = await supabaseAdmin
