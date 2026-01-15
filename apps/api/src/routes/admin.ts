@@ -1240,15 +1240,27 @@ export function registerAdminRoutes(app: FastifyInstance) {
       }
     };
     const missCount = async (user_id: string) => {
+      // Count unique missed days excluding skipped (test-mode).
       const r = await supabaseAdmin
         .from("wallet_ledger")
-        .select("id")
+        .select("reason")
         .eq("challenge_id", challenge.id)
         .eq("user_id", user_id)
-        .ilike("reason", "penalty:miss:%")
+        .or("reason.ilike.penalty:miss:%,reason.ilike.penalty:skip:%")
         .limit(5000);
       if (r.error) throw r.error;
-      return (r.data || []).length;
+      const miss = new Set<string>();
+      const skip = new Set<string>();
+      for (const row of (r.data || []) as any[]) {
+        const reason = String(row?.reason || "");
+        let m = reason.match(/^penalty:miss:(\d{4}-\d{2}-\d{2})$/);
+        if (m?.[1]) miss.add(m[1]);
+        m = reason.match(/^penalty:skip:(\d{4}-\d{2}-\d{2})$/);
+        if (m?.[1]) skip.add(m[1]);
+      }
+      let n = 0;
+      for (const d of miss) if (!skip.has(d)) n += 1;
+      return n;
     };
 
     // Active participations
@@ -1398,7 +1410,8 @@ export function registerAdminRoutes(app: FastifyInstance) {
       const kb = {
         inline_keyboard: [
           [{ text: "✅ Выполнить штрафное задание", callback_data: `pen:task:${localDate}` }],
-          [{ text: "💳 Оплатить штраф", callback_data: `pen:pay:${localDate}` }]
+          [{ text: "💳 Оплатить штраф", callback_data: `pen:pay:${localDate}` }],
+          [{ text: "⏭ Пропустить штраф (тест)", callback_data: `pen:skip:${localDate}` }]
         ]
       };
 

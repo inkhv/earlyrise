@@ -1,9 +1,9 @@
 import { InlineKeyboard, type Bot } from "grammy";
 import type { ApiResponse } from "../apiClient.js";
 
-function parsePenaltyCb(data: string): { action: "task" | "pay"; local_date: string } | null {
-  // data: "pen:<task|pay>:YYYY-MM-DD"
-  const m = data.match(/^pen:(task|pay):(\d{4}-\d{2}-\d{2})$/);
+function parsePenaltyCb(data: string): { action: "task" | "pay" | "skip"; local_date: string } | null {
+  // data: "pen:<task|pay|skip>:YYYY-MM-DD"
+  const m = data.match(/^pen:(task|pay|skip):(\d{4}-\d{2}-\d{2})$/);
   if (!m) return null;
   const action = m[1] as any;
   const local_date = m[2];
@@ -29,11 +29,23 @@ export function registerPenaltyHandlers(params: {
 }) {
   const { bot, api, curatorTelegramUserId } = params;
 
-  bot.callbackQuery(/^pen:(task|pay):\d{4}-\d{2}-\d{2}$/, async (ctx) => {
+  bot.callbackQuery(/^pen:(task|pay|skip):\d{4}-\d{2}-\d{2}$/, async (ctx) => {
     if (!ctx.from) return;
     const parsed = parsePenaltyCb(ctx.callbackQuery.data);
     if (!parsed) return;
     await ctx.answerCallbackQuery();
+
+    if (parsed.action === "skip") {
+      const rr = await api("/bot/penalty/skip", {
+        method: "POST",
+        body: JSON.stringify({ telegram_user_id: ctx.from.id, local_date: parsed.local_date })
+      });
+      const jj: any = rr.json;
+      if (!rr.ok || !jj?.ok) {
+        return ctx.reply(jj?.message || `Не получилось пропустить штраф (HTTP ${rr.status}).`);
+      }
+      return ctx.reply(String(jj.message || "Ок, штраф пропущен ✅"));
+    }
 
     const choiceRes = await api("/bot/penalty/choose", {
       method: "POST",

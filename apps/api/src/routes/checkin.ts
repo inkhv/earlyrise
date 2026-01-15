@@ -502,18 +502,35 @@ async function ledgerInsertMarker(params: { user_id: string; challenge_id: strin
 }
 
 async function penaltyMissCount(params: { user_id: string; challenge_id: string }): Promise<number> {
+  // Count unique missed days that were NOT skipped (test-mode).
+  // We store markers:
+  // - penalty:miss:YYYY-MM-DD
+  // - penalty:skip:YYYY-MM-DD
   const r = await supabaseAdmin
     .from("wallet_ledger")
-    .select("id")
+    .select("reason")
     .eq("user_id", params.user_id)
     .eq("challenge_id", params.challenge_id)
-    .ilike("reason", "penalty:miss:%")
+    .or("reason.ilike.penalty:miss:%,reason.ilike.penalty:skip:%")
     .limit(5000);
   if (r.error) throw r.error;
-  return (r.data || []).length;
+  const miss = new Set<string>();
+  const skip = new Set<string>();
+  for (const row of (r.data || []) as any[]) {
+    const reason = String(row?.reason || "");
+    let m = reason.match(/^penalty:miss:(\d{4}-\d{2}-\d{2})$/);
+    if (m?.[1]) miss.add(m[1]);
+    m = reason.match(/^penalty:skip:(\d{4}-\d{2}-\d{2})$/);
+    if (m?.[1]) skip.add(m[1]);
+  }
+  let n = 0;
+  for (const d of miss) if (!skip.has(d)) n += 1;
+  return n;
 }
 
 async function todayPenaltyLevel(params: { user_id: string; challenge_id: string; localDate: string }): Promise<number | null> {
+  const isSkipped = await ledgerHasReason({ user_id: params.user_id, challenge_id: params.challenge_id, reason: penaltyReason("skip", params.localDate) });
+  if (isSkipped) return null;
   const hasToday = await ledgerHasReason({ user_id: params.user_id, challenge_id: params.challenge_id, reason: penaltyReason("miss", params.localDate) });
   if (!hasToday) return null;
   const n = await penaltyMissCount({ user_id: params.user_id, challenge_id: params.challenge_id });
@@ -1224,6 +1241,47 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     }
     await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_approved:${local_date}` });
     return { ok: true };
+  });
+
+  // POST /bot/penalty/skip (test-mode): forgive today's penalty and do not count it in levels
+  // body: { telegram_user_id: number, local_date?: "YYYY-MM-DD" }
+  app.post("/bot/penalty/skip", async (req, reply) => {
+    const body = (req.body || {}) as any;
+    const telegram_user_id = Number(body.telegram_user_id);
+    let local_date = String(body.local_date || "").trim();
+    if (!telegram_user_id) {
+      reply.code(400);
+      return { ok: false, error: "missing_telegram_user_id" };
+    }
+    const challenge = await getActiveChallenge();
+    if (!challenge) {
+      reply.code(409);
+      return { ok: false, error: "no_active_challenge" };
+    }
+    const userRes = await supabaseAdmin.from("users").select("*").eq("telegram_user_id", telegram_user_id).maybeSingle();
+    if (!userRes.data) {
+      reply.code(404);
+      return { ok: false, error: "user_not_found" };
+    }
+    if (!local_date) {
+      const tz = userRes.data.timezone || "GMT+00:00";
+      local_date = utcRangeForLocalDay({ now: new Date(), timeZone: tz }).localDate;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(local_date)) {
+      reply.code(400);
+      return { ok: false, error: "invalid_local_date" };
+    }
+
+    const hasMiss = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("miss", local_date) });
+    if (!hasMiss) {
+      reply.code(409);
+      return { ok: false, error: "no_penalty_today", message: "Сегодня штраф не назначен." };
+    }
+    const already = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("skip", local_date) });
+    if (already) return { ok: true, message: "Ок, штраф пропущен (тест) ✅" };
+
+    await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("skip", local_date) });
+    return { ok: true, message: "Ок, штраф пропущен (тест) ✅" };
   });
 
   // POST /bot/trial/claim (enable 7-day free trial for active challenge)
