@@ -15,6 +15,7 @@ const ANNOUNCEMENT_TEXT =
   "- в личку боту отправляем голосовое с планами на утро и отвечаем на короткую задачку.";
 
 const plusReminderSent = new Set<string>(); // key: `${telegram_user_id}:${local_date}` (mark only on successful DM)
+const plusRejectedNotified = new Set<string>(); // key: `${telegram_user_id}:${local_date}` (best-effort DM on rejected '+')
 
 export function registerGroupHandlers(params: {
   bot: Bot;
@@ -85,6 +86,27 @@ export function registerGroupHandlers(params: {
               // user may not have started DM with bot, or blocked bot
               console.error(`DM reminder failed for user ${ctx.from.id} (likely no /start in DM yet).`);
             }
+          }
+        }
+      } else if (r.ok && res && res.ok === false && typeof res.local_date === "string") {
+        // Important: if '+' was not counted, tell user immediately so штраф doesn't look random later.
+        const key = `${ctx.from.id}:${res.local_date}`;
+        if (!plusRejectedNotified.has(key)) {
+          let reasonText = "не засчитан";
+          const err = String(res.error || res.reject_reason || "").trim();
+          if (err === "outside_window") reasonText = "не засчитан: вне окна по времени подъёма";
+          else if (err === "missing_wake_time") reasonText = "не засчитан: не задано время подъёма";
+          else if (err === "not_joined") reasonText = "не засчитан: ты ещё не присоединился(ась) к челленджу";
+          try {
+            await ctx.api.sendMessage(
+              ctx.from.id,
+              `Вижу твой + в чате, но он ${reasonText}.\n\n` +
+                `Если ничего не поменять — после wake+30 включится штрафной режим.\n\n` +
+                `Проверь таймзону и время подъёма (через /menu).`
+            );
+            plusRejectedNotified.add(key);
+          } catch {
+            // ignore (no DM / blocked)
           }
         }
       }
