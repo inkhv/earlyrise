@@ -1014,7 +1014,24 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     });
     const alreadyChoiceTask = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_task", local_date) });
     const alreadyChoicePay = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_pay", local_date) });
-    if (alreadySkip || alreadyTaskSubmitted || alreadyChoiceTask || alreadyChoicePay) {
+    const alreadyTaskApproved = await ledgerHasReason({
+      user_id: userRes.data.id,
+      challenge_id: challenge.id,
+      reason: `penalty:task_approved:${local_date}`
+    });
+    // Allow switching from TASK -> PAY (only if video not sent/approved and not skipped)
+    if (choice === "pay" && alreadyChoiceTask && !alreadyTaskSubmitted && !alreadyTaskApproved && !alreadySkip) {
+      await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_pay", local_date) });
+      return {
+        ok: true,
+        choice,
+        level,
+        squats: info.squats,
+        fine_rub: info.fine_rub,
+        message: `Ок.\n\nОплати штраф ${info.fine_rub} ₽ до 23:59 сегодня. Сейчас пришлю ссылку на оплату.`
+      };
+    }
+    if (alreadySkip || alreadyTaskSubmitted || alreadyTaskApproved || alreadyChoiceTask || alreadyChoicePay) {
       reply.code(409);
       return { ok: false, error: "already_chosen", message: "Уже выбрано/отправлено. Повторно не нужно ✅" };
     }
@@ -1081,19 +1098,20 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       return { ok: false, error: "kicked", message: "Это 4-й пропуск: участие остановлено." };
     }
 
-    // One-shot: if user already picked task / submitted task / skipped, do not allow payment.
-    const skipped = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("skip", local_date) });
-    const chosenTask = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_task", local_date) });
-    const submitted = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_submitted:${local_date}` });
-    const approved = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_approved:${local_date}` });
-    if (skipped || chosenTask || submitted || approved) {
-      reply.code(409);
-      return { ok: false, error: "already_done", message: "Штраф уже закрыт/выбран. Повторно не нужно ✅" };
-    }
+    // Require explicit pay choice (allows switching from task -> pay).
     const chosenPay = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_pay", local_date) });
     if (!chosenPay) {
       reply.code(409);
       return { ok: false, error: "pay_not_chosen", message: "Сначала нажми «💳 Оплатить штраф» в сообщении со штрафом." };
+    }
+
+    // One-shot: if user already submitted/approved/skip, do not allow payment.
+    const skipped = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("skip", local_date) });
+    const submitted = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_submitted:${local_date}` });
+    const approved = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_approved:${local_date}` });
+    if (skipped || submitted || approved) {
+      reply.code(409);
+      return { ok: false, error: "already_done", message: "Штраф уже закрыт/выбран. Повторно не нужно ✅" };
     }
 
     if (!env.TBANK_TERMINAL_KEY || !env.TBANK_PASSWORD) {
