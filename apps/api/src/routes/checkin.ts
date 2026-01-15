@@ -69,6 +69,16 @@ function tbankToken(payload: Record<string, any>, password: string): string {
   return sha256Hex(concat);
 }
 
+function tbankOrderId(parts: Array<string | number>): string {
+  // T-Bank requirement: OrderId length must be 1..50
+  const raw = parts
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+    .join("_");
+  const safe = raw.replace(/[^\w.-]/g, "_");
+  return safe.length <= 50 ? safe : safe.slice(0, 50);
+}
+
 async function openaiTranscribe(params: {
   apiKey: string;
   model: string;
@@ -744,7 +754,7 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     const amountKopeks = Math.round(amountRub * 100);
 
     const safePlan = plan_code ? plan_code.replace(/[^\w-]/g, "").slice(0, 16) : "default";
-    const orderId = `er_${challenge.id.slice(0, 8)}_${telegram_user_id}_${safePlan}_${Date.now()}`;
+    const orderId = tbankOrderId(["er", challenge.id.slice(0, 8), telegram_user_id, safePlan, Date.now().toString(36)]);
     const description = selected ? `EarlyRise: ${selected.title}` : `EarlyRise: доступ к челленджу`;
     const initPayload: any = {
       TerminalKey: env.TBANK_TERMINAL_KEY,
@@ -1054,7 +1064,8 @@ export function registerCheckinRoutes(app: FastifyInstance) {
 
     const amountRub = info.fine_rub;
     const amountKopeks = Math.round(amountRub * 100);
-    const orderId = `er_penalty_${challenge.id.slice(0, 8)}_${telegram_user_id}_${local_date}_l${level}_${Date.now()}`;
+    const dateCompact = local_date.replace(/-/g, ""); // YYYYMMDD
+    const orderId = tbankOrderId(["erP", challenge.id.slice(0, 6), telegram_user_id, dateCompact, `L${level}`, Date.now().toString(36)]);
     const initPayload: any = {
       TerminalKey: env.TBANK_TERMINAL_KEY,
       Amount: amountKopeks,
