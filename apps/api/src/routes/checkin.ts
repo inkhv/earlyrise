@@ -1005,6 +1005,20 @@ export function registerCheckinRoutes(app: FastifyInstance) {
       return { ok: false, error: "kicked", message: "Это 4-й пропуск: участие остановлено." };
     }
 
+    // One-shot: once user acted (skip / chose task/pay / submitted), don't allow changing path.
+    const alreadySkip = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("skip", local_date) });
+    const alreadyTaskSubmitted = await ledgerHasReason({
+      user_id: userRes.data.id,
+      challenge_id: challenge.id,
+      reason: `penalty:task_submitted:${local_date}`
+    });
+    const alreadyChoiceTask = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_task", local_date) });
+    const alreadyChoicePay = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_pay", local_date) });
+    if (alreadySkip || alreadyTaskSubmitted || alreadyChoiceTask || alreadyChoicePay) {
+      reply.code(409);
+      return { ok: false, error: "already_chosen", message: "Уже выбрано/отправлено. Повторно не нужно ✅" };
+    }
+
     await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason(`choice_${choice}`, local_date) });
 
     if (choice === "task") {
@@ -1065,6 +1079,21 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     if (info.kick) {
       reply.code(409);
       return { ok: false, error: "kicked", message: "Это 4-й пропуск: участие остановлено." };
+    }
+
+    // One-shot: if user already picked task / submitted task / skipped, do not allow payment.
+    const skipped = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("skip", local_date) });
+    const chosenTask = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_task", local_date) });
+    const submitted = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_submitted:${local_date}` });
+    const approved = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_approved:${local_date}` });
+    if (skipped || chosenTask || submitted || approved) {
+      reply.code(409);
+      return { ok: false, error: "already_done", message: "Штраф уже закрыт/выбран. Повторно не нужно ✅" };
+    }
+    const chosenPay = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_pay", local_date) });
+    if (!chosenPay) {
+      reply.code(409);
+      return { ok: false, error: "pay_not_chosen", message: "Сначала нажми «💳 Оплатить штраф» в сообщении со штрафом." };
     }
 
     if (!env.TBANK_TERMINAL_KEY || !env.TBANK_PASSWORD) {
@@ -1196,6 +1225,20 @@ export function registerCheckinRoutes(app: FastifyInstance) {
     if (!chosen) {
       reply.code(409);
       return { ok: false, error: "task_not_chosen", message: "Сначала выбери «Выполнить штрафное задание»." };
+    }
+
+    // One-shot: only one video per day. Also block if user chose pay/skip.
+    const skipped = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("skip", local_date) });
+    const chosenPay = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: penaltyReason("choice_pay", local_date) });
+    if (skipped || chosenPay) {
+      reply.code(409);
+      return { ok: false, error: "already_done", message: "Штраф уже закрыт/выбран. Видео больше не нужно ✅" };
+    }
+    const submitted = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_submitted:${local_date}` });
+    const approved = await ledgerHasReason({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_approved:${local_date}` });
+    if (submitted || approved) {
+      reply.code(409);
+      return { ok: false, error: "already_submitted", message: "Видео уже получено ✅ Повторно отправлять не нужно." };
     }
 
     await ledgerInsertMarker({ user_id: userRes.data.id, challenge_id: challenge.id, reason: `penalty:task_submitted:${local_date}` });

@@ -82,7 +82,16 @@ export function registerPenaltyHandlers(params: {
     });
     const submitJson: any = submitRes.json;
     if (!submitRes.ok || !submitJson?.ok) {
-      // Not a penalty video (ignore silently to avoid annoyance)
+      // Not a penalty video OR already handled — keep it minimal.
+      const err = String(submitJson?.error || "");
+      if (err === "already_submitted" || err === "already_done" || err === "task_not_chosen") {
+        const msg = submitJson?.message ? String(submitJson.message) : "Видео больше не нужно ✅";
+        try {
+          await ctx.reply(msg);
+        } catch {
+          // ignore
+        }
+      }
       return;
     }
 
