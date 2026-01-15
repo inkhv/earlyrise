@@ -7,7 +7,7 @@ import { registerGroupHandlers } from "./handlers/group.js";
 import { registerDmHandlers } from "./handlers/dm.js";
 import { registerMenuHandlers, showMainMenu } from "./handlers/menu.js";
 import { registerPenaltyHandlers } from "./handlers/penalty.js";
-import { markAwaitingTimezone } from "./state.js";
+import { isAwaitingPenaltyVideo, markAwaitingTimezone } from "./state.js";
 
 function loadEnvLocal() {
   // Cursor workspace may block dotfiles; we use env.local instead of .env.
@@ -59,6 +59,25 @@ export async function startBot() {
   const bot = new Bot(E.TELEGRAM_BOT_TOKEN);
   const api = createApiClient(E.API_BASE_URL);
   const curatorTelegramUserId = E.CURATOR_TELEGRAM_USER_ID && /^\d+$/.test(E.CURATOR_TELEGRAM_USER_ID) ? Number(E.CURATOR_TELEGRAM_USER_ID) : null;
+
+  // Guard: while user is in "send penalty video" mode, ignore commands and other messages.
+  bot.use(async (ctx, next) => {
+    const chatType = (ctx.chat as any)?.type;
+    const fromId = (ctx.from as any)?.id;
+    if (chatType === "private" && typeof fromId === "number" && isAwaitingPenaltyVideo(fromId)) {
+      const hasVideo = Boolean((ctx.message as any)?.video);
+      const isCallback = Boolean((ctx.update as any)?.callback_query);
+      if (!hasVideo && !isCallback) {
+        try {
+          await ctx.reply("Сейчас жду видео по штрафному заданию. Просто отправь видео — остальное пока не обрабатываю.");
+        } catch {
+          // ignore
+        }
+        return;
+      }
+    }
+    return await next();
+  });
 
   async function registerStartGuard(ctx: any) {
     if (ctx.from) {

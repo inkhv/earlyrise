@@ -1,5 +1,6 @@
 import { InlineKeyboard, type Bot } from "grammy";
 import type { ApiResponse } from "../apiClient.js";
+import { clearAwaitingPenaltyVideo, markAwaitingPenaltyVideo } from "../state.js";
 
 function parsePenaltyCb(data: string): { action: "task" | "pay" | "skip"; local_date: string } | null {
   // data: "pen:<task|pay|skip>:YYYY-MM-DD"
@@ -44,6 +45,7 @@ export function registerPenaltyHandlers(params: {
       if (!rr.ok || !jj?.ok) {
         return ctx.reply(jj?.message || `Не получилось пропустить штраф (HTTP ${rr.status}).`);
       }
+      clearAwaitingPenaltyVideo(ctx.from.id);
       return ctx.reply(String(jj.message || "Ок, штраф пропущен ✅"));
     }
 
@@ -58,6 +60,7 @@ export function registerPenaltyHandlers(params: {
     await ctx.reply(String(choiceJson.message || "Ок."));
 
     if (parsed.action === "pay") {
+      clearAwaitingPenaltyVideo(ctx.from.id);
       const payRes = await api("/bot/penalty/pay/create", {
         method: "POST",
         body: JSON.stringify({ telegram_user_id: ctx.from.id, local_date: parsed.local_date })
@@ -68,6 +71,9 @@ export function registerPenaltyHandlers(params: {
       }
       return ctx.reply(`Ссылка на оплату: ${payJson.payment_url}`);
     }
+
+    // task mode: wait for a single video; block other commands/messages until video is sent.
+    markAwaitingPenaltyVideo(ctx.from.id);
   });
 
   // User sends video -> forward to curator and add approve button
@@ -92,10 +98,12 @@ export function registerPenaltyHandlers(params: {
           // ignore
         }
       }
+      clearAwaitingPenaltyVideo(ctx.from.id);
       return;
     }
 
     await ctx.reply("Видео получено ✅ Отправляю куратору на проверку.");
+    clearAwaitingPenaltyVideo(ctx.from.id);
 
     const curatorId = Number.isFinite(Number(submitJson.curator_telegram_user_id))
       ? Number(submitJson.curator_telegram_user_id)
