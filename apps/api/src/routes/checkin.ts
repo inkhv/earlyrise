@@ -1619,11 +1619,11 @@ export function registerCheckinRoutes(app: FastifyInstance) {
         const localNow = getLocalParts(now, tz);
         const nowMinutes = minutesOfDay(localNow.hour, localNow.minute);
         const wakeMinutes = minutesOfDay(parsedWake.hour, parsedWake.minute);
-        const afterLimit = 10; // +10 минут
+        const afterLimit = 30; // +30 минут (штрафной режим стартует после wake+30)
         const beforeLimit = 55; // -55 минут
         const earliest = (wakeMinutes - beforeLimit + 1440) % 1440;
         const latest = (wakeMinutes + afterLimit) % 1440;
-        // Spec (updated): "+" must be within [wake-55; wake+10] in user's local time.
+        // Spec: "+" must be within [wake-55; wake+30] in user's local time.
         inTime = inMinutesRangeCircular(nowMinutes, earliest, latest);
         reason = inTime ? null : "outside_window";
       }
