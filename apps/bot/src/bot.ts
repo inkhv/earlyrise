@@ -94,25 +94,9 @@ export async function startBot() {
   }
 
   async function registerMeGuard(ctx: any) {
-    await ctx.reply("Запросил профиль…");
-    if (!ctx.from) return;
-    console.log(
-      JSON.stringify({ t: "guard", handler: "me", step: "call_api", user: ctx.from.id, base_url: E.API_BASE_URL })
-    );
-    const r = await api(`/bot/me/${ctx.from.id}`, { method: "GET" });
-    const res: any = r.json;
-    console.log(JSON.stringify({ t: "guard", handler: "me", step: "api_done", status: r.status }));
-    if (r.ok && res?.user) {
-      const s = res?.stats;
-      await ctx.reply(
-        `Профиль:\n- timezone: ${res.user.timezone}\n- streak: ${s?.streak_days ?? 0}\n- total: ${s?.total_checkins ?? 0}\n- last: ${s?.last_checkin_at_utc ?? "—"}`
-      );
-      if (res?.offer?.message) {
-        await ctx.reply(String(res.offer.message));
-      }
-    } else {
-      await ctx.reply(res?.message || `Ошибка API /me (${r.status}).`);
-    }
+    // Keep /me as a lightweight redirect to avoid duplicated/legacy formatting.
+    await ctx.reply("Открой /menu — там актуальная статистика и все действия.");
+    return showMainMenu({ ctx, api });
   }
 
   // Minimal observability: log only commands so we can confirm updates are received in production.
@@ -272,15 +256,8 @@ export async function startBot() {
 
   // Ensure we are the only consumer (no webhook), and ensure command list is up-to-date.
   await bot.api.deleteWebhook({ drop_pending_updates: true });
-  await bot.api.setMyCommands([
-    { command: "start", description: "старт" },
-    { command: "menu", description: "меню (кнопки)" },
-    { command: "me", description: "профиль и статистика" },
-    { command: "settz", description: "установить таймзону (GMT+3 или геопозиция)" },
-    { command: "trial", description: "активировать пробную неделю (если предложено)" },
-    { command: "pay", description: "оплатить участие" },
-    { command: "join", description: "время подъёма: /join 07:00 или /join flex" }
-  ]);
+  // Keep the command list minimal: only /menu in the Telegram UI.
+  await bot.api.setMyCommands([{ command: "menu", description: "меню (кнопки)" }]);
 
   // --- Group policy ---
   // Never process commands in group chats: delete them and redirect user to DM.
