@@ -57,7 +57,7 @@ export function registerPenaltyHandlers(params: {
       }
       // Hide buttons so the action feels applied immediately.
       try {
-        await ctx.editMessageReplyMarkup(new InlineKeyboard());
+        await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
       } catch {
         // ignore
       }
