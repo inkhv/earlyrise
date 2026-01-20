@@ -34,7 +34,6 @@ export function registerPenaltyHandlers(params: {
     if (!ctx.from) return;
     const parsed = parsePenaltyCb(ctx.callbackQuery.data);
     if (!parsed) return;
-    await ctx.answerCallbackQuery();
 
     if (parsed.action === "skip") {
       const rr = await api("/bot/penalty/skip", {
@@ -43,12 +42,33 @@ export function registerPenaltyHandlers(params: {
       });
       const jj: any = rr.json;
       if (!rr.ok || !jj?.ok) {
+        try {
+          await ctx.answerCallbackQuery({ text: "Не получилось пропустить", show_alert: true });
+        } catch {
+          // ignore
+        }
         return ctx.reply(jj?.message || `Не получилось пропустить штраф (HTTP ${rr.status}).`);
       }
       clearAwaitingPenaltyVideo(ctx.from.id);
+      try {
+        await ctx.answerCallbackQuery({ text: "Штраф пропущен ✅", show_alert: true });
+      } catch {
+        // ignore
+      }
+      // Hide buttons so the action feels applied immediately.
+      try {
+        await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+      } catch {
+        // ignore
+      }
       return ctx.reply(String(jj.message || "Ок, штраф пропущен ✅"));
     }
 
+    try {
+      await ctx.answerCallbackQuery();
+    } catch {
+      // ignore
+    }
     const choiceRes = await api("/bot/penalty/choose", {
       method: "POST",
       body: JSON.stringify({ telegram_user_id: ctx.from.id, local_date: parsed.local_date, choice: parsed.action })
