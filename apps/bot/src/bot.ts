@@ -7,7 +7,7 @@ import { registerGroupHandlers } from "./handlers/group.js";
 import { registerDmHandlers } from "./handlers/dm.js";
 import { registerMenuHandlers, showMainMenu } from "./handlers/menu.js";
 import { registerPenaltyHandlers } from "./handlers/penalty.js";
-import { isAwaitingPenaltyVideo, markAwaitingTimezone } from "./state.js";
+import { clearAwaitingTimezone, isAwaitingPenaltyVideo, isAwaitingTimezone, markAwaitingTimezone } from "./state.js";
 
 function loadEnvLocal() {
   // Cursor workspace may block dotfiles; we use env.local instead of .env.
@@ -136,6 +136,13 @@ export async function startBot() {
     const text = ctx.message?.text || "";
     if (!text.startsWith("/")) return next();
     const cmd = (text.split(/\s+/)[0] ?? "").toLowerCase();
+    if (ctx.from && isAwaitingTimezone(ctx.from.id)) {
+      // While awaiting timezone, block other commands to avoid confusing state.
+      if (cmd !== "/settz" && !cmd.startsWith("/settz@")) {
+        await ctx.reply("Сейчас жду таймзону. Напиши GMT+3 (или GMT-5), либо отправь геопозицию после /settz.\n\nЧтобы отменить — напиши «Отмена».");
+        return;
+      }
+    }
     if (cmd === "/start" || cmd.startsWith("/start@")) {
       console.log(JSON.stringify({ t: "guard", handler: "start", from_id: ctx.from?.id }));
       try {
@@ -206,6 +213,7 @@ export async function startBot() {
           body: JSON.stringify({ telegram_user_id: ctx.from?.id, timezone: tzToSave })
         });
         if (!r.ok) return ctx.reply(`Ошибка API /settz (${r.status}).`);
+        if (ctx.from) clearAwaitingTimezone(ctx.from.id);
         return ctx.reply(`Ок, таймзона обновлена: ${tzToSave}`);
       }
       // fallback: just echo guidance
@@ -218,7 +226,7 @@ export async function startBot() {
         return ctx.reply(
           "Формат:\n" +
             "/join 07:00 — фиксированный режим\n" +
-            "/join flex — режим без точного времени\n\n" +
+            "/join flex — режим без точного времени (ставишь + когда проснулся)\n\n" +
             "Доступные фиксированные режимы: 05:00, 06:00, 07:00, 08:00, 09:00"
         );
       }

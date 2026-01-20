@@ -144,6 +144,11 @@ export function registerDmHandlers(params: {
 
     // Buttons typed as plain text (best-effort)
     const tLower = text.toLowerCase();
+    if (tLower === "отмена" || tLower === "cancel" || tLower === "стоп") {
+      // Outside timezone flow: treat as a safe no-op and show menu (avoid accidental "analysis" as check-in).
+      await ctx.reply("Ок.");
+      return showMainMenu({ ctx, api });
+    }
     if (tLower === "меню") return showMainMenu({ ctx, api });
     if (tLower === "о проекте") {
       await ctx.reply(

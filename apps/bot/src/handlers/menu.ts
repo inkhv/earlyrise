@@ -48,8 +48,9 @@ function accessStatusFromMe(me: MeResponse | null): AccessStatus {
 }
 
 function statusLabelRu(status: AccessStatus): string {
-  // Spec: active only when actually paid; otherwise "ожидается оплата" (incl trial).
-  return status === "paid" ? "активный" : "ожидается оплата";
+  if (status === "paid") return "активный";
+  if (status === "trial") return "пробный";
+  return "ожидается оплата";
 }
 
 function mainMenuKeyboard(params: { status: AccessStatus; hasTrialOffer: boolean }) {
