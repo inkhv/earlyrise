@@ -94,7 +94,8 @@ export function registerDmHandlers(params: {
       });
       if (!r.ok) return ctx.reply(`Ошибка API /settz (${r.status}).`);
       clearAwaitingTimezone(ctx.from.id);
-      return ctx.reply(`Ок, таймзона обновлена по геопозиции: ${tzNorm}`);
+      await ctx.reply(`Ок, таймзона обновлена по геопозиции: ${tzNorm}`, { reply_markup: { remove_keyboard: true } });
+      return showMainMenu({ ctx, api });
     } catch (e: any) {
       return ctx.reply(`Не смог определить таймзону по геопозиции. Напиши GMT+3 вручную. (${e?.message || e})`);
     }
@@ -125,7 +126,7 @@ export function registerDmHandlers(params: {
       const lower = text.toLowerCase();
       if (lower === "отмена" || lower === "cancel" || lower === "стоп") {
         clearAwaitingTimezone(ctx.from.id);
-        await ctx.reply("Ок, отменил.");
+        await ctx.reply("Ок, отменил.", { reply_markup: { remove_keyboard: true } });
         return showMainMenu({ ctx, api });
       }
       const gmt = parseGmtOffsetInput(text);
@@ -137,7 +138,8 @@ export function registerDmHandlers(params: {
         });
         if (!r.ok) return ctx.reply(`Ошибка API /settz (${r.status}).`);
         clearAwaitingTimezone(ctx.from.id);
-        return ctx.reply(`Ок, таймзона обновлена: ${tzNorm}`);
+        await ctx.reply(`Ок, таймзона обновлена: ${tzNorm}`, { reply_markup: { remove_keyboard: true } });
+        return showMainMenu({ ctx, api });
       }
       return ctx.reply("Напиши GMT+3 (или GMT-5), либо отправь геопозицию 📍.");
     }
